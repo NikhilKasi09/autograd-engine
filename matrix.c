@@ -4,6 +4,11 @@
 #include <stdio.h>
 
 matrix_t *matrix_create(size_t size) {
+    if (size <= 0) {
+        fprintf(stderr, "Error: Matrix size must be greater than 0.\n");
+        return NULL;
+    }
+
     // Allocate standard memory for the struct
     matrix_t *mat = malloc(sizeof(matrix_t));
     // Ensure malloc succeeded
