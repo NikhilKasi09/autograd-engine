@@ -1,43 +1,34 @@
 #include "validate.h"
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 
-//commented out code gives a detailed report on the mismatches 
+//tolerance to check if two floats the same
 #define TOLERANCE 1e-4f
-// #define MAX_PRINTED_MISMATCHES 10
 
 int matrices_match(const matrix_t *expected, const matrix_t *actual) {
-
-    //make sure that both sizes are the same 
+    //see if the size is actually the same
     if (expected->size != actual->size) {
-        return 0;
+        fprintf(stderr,
+                "Size mismatch (expected=%zu, actual=%zu)\n",
+                expected->size, actual->size);
+        exit(1);
     }
 
-    //initiliasers for the tests
     size_t N = expected->size;
     size_t total_elements = N * N;
-    int ok = 1;
-    // int mismatches_printed = 0;
-    // size_t mismatch_count = 0;
 
-    //lop through each elements and check that they are within tolerance
+    //actually compare values now
     for (size_t i = 0; i < total_elements; i++) {
         float diff = fabsf(expected->data[i] - actual->data[i]);
 
         if (diff > TOLERANCE) {
-            ok = 0;
-            // mismatch_count++;
-
-            //below will print max 10 mismatches because if there is a lot of mismatches (example 100) then it will be harder to debug.
-            // if (mismatches_printed < MAX_PRINTED_MISMATCHES) {
-            //     fprintf(stderr,
-            //             "Mismatch at index %zu: expected=%f, actual=%f",
-            //             i, expected->data[i], actual->data[i], diff);
-            //     mismatches_printed++;
-            // }
+            fprintf(stderr,
+                    "Mismatch at index %zu: expected=%f, actual=%f, diff=%f\n",
+                    i, expected->data[i], actual->data[i], diff);
+            exit(1);
         }
     }
 
-
-    return ok;
+    return 1;
 }
