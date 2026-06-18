@@ -77,4 +77,22 @@ void gemm_tiled(const matrix_t *A, const matrix_t *B, matrix_t *C);
 void gemm_tiled_simd(const matrix_t *A, const matrix_t *B, matrix_t *C);
 
 
+/**
+ * @brief Computes matrix multiplication (C = A * B) by horizontally partitioning
+ *        the output matrix across a pool of POSIX threads.
+ *
+ * Splits C into num_threads horizontal row-slices (see thread_args_t), so that
+ * each worker thread owns a disjoint, contiguous range of rows and never writes
+ * to a cache line touched by another thread (avoiding false sharing). Each
+ * worker computes its slice using the same 64x64 cache-tiled, AVX2-vectorized
+ * kernel as gemm_tiled_simd, restricted to its assigned row boundaries.
+ *
+ * @param A Pointer to the first input matrix struct (read-only).
+ * @param B Pointer to the second input matrix struct (read-only).
+ * @param C Pointer to the output matrix struct. Must be zero-initialised before call.
+ * @param num_threads Number of worker threads to spawn (clamped to matrix size).
+ */
+void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int num_threads);
+
+
 #endif
