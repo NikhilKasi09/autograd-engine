@@ -88,8 +88,9 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
         return;
     }
 
+    //  Slice C horizontally by row, evening out the remainder 
     size_t base_rows   = logical_size / nthreads;
-    size_t remainder    = logical_size % nthreads;
+    size_t remainder   = logical_size % nthreads;
     size_t current_row = 0;
 
     for (size_t t = 0; t < nthreads; t++) {
@@ -107,6 +108,7 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
         current_row = args[t].end_row;
     }
 
+    // Spin up the worker pool
     size_t spawned = 0;
     for (size_t t = 0; t < nthreads; t++) {
         int rc = pthread_create(&threads[t], NULL, gemm_worker, &args[t]);
@@ -117,8 +119,7 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
         spawned++;
     }
 
-    // Join whichever threads actually got created, even if one failed midway,
-    // so we never leak running threads or join uninitialised pthread_t values.
+    // Join whichever threads actually got created, even if one failed midway, so we never leak running threads or join uninitialised pthread_t values.
     for (size_t t = 0; t < spawned; t++) {
         pthread_join(threads[t], NULL);
     }
