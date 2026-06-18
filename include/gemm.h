@@ -94,6 +94,19 @@ void gemm_tiled_simd(const matrix_t *A, const matrix_t *B, matrix_t *C);
  */
 void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int num_threads);
 
+/**
+ * @brief Computes matrix multiplication (C = A * B) using cache-aware loop reordering.
+ *
+ * This function implements the i-k-j nested loop order, swapping the position of the
+ * j and k loops relative to the naive i-j-k implementation. By fixing row i of A and
+ * row k of B for each middle-loop iteration, the innermost j loop walks through B and
+ * C sequentially in row-major order. This basically eliminates the cache misses by exploting spatial locality.
+ *
+ * @param A Pointer to the first input matrix struct (read-only).
+ * @param B Pointer to the second input matrix struct (read-only).
+ * @param C Pointer to the output matrix struct. Must be zero-initialised before call,
+ *          since this function accumulates into existing values rather than overwriting.
+ */
 void gemm_ikj(const matrix_t *A, const matrix_t *B, matrix_t *C);
 
 
