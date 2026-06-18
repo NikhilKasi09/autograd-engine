@@ -1,5 +1,6 @@
 #include "benchmark.h"
 #include <time.h>
+#include <string.h>
 
 #define TIMED_RUNS    5
 
@@ -8,6 +9,9 @@ benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const matrix_t *A, cons
     struct timespec start, end;
     benchmark_result_t result;
     double times[TIMED_RUNS];
+
+    // Scrub C clean before the warmup run
+    memset(C->data, 0, C->padded_size * C->padded_size * sizeof(float));
 
     // Warmup run for cold cache
     kernel(A, B, C);
@@ -18,6 +22,9 @@ benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const matrix_t *A, cons
 
     // Timed hot runs 
     for (int i = 0; i < TIMED_RUNS; i++) {
+
+        // Scrub C clean BEFORE starting the hardware clock
+        memset(C->data, 0, C->padded_size * C->padded_size * sizeof(float));
         
         // Start clock
         clock_gettime(CLOCK_MONOTONIC, &start);
