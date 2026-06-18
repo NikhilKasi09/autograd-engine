@@ -2,8 +2,6 @@
 #include "validate.h"
 #include <stdio.h>
 
-#define BLOCK_SIZE 64
-
 static void gemm_tiled_kernel(size_t N, const float * restrict A, const float * restrict B, float * restrict C) {
 
     // Outer loops (slide the 64x64 window across the matrices)

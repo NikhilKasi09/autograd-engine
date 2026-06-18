@@ -5,9 +5,11 @@
 
 // Alignment requirement for AVX2 registers
 #define ALIGNMENT_REQ 32
+#define BLOCK_SIZE 64
 
 typedef struct {
     size_t size;
+    size_t padded_size;
     float *data;
 } matrix_t;
 

@@ -19,8 +19,11 @@ matrix_t *matrix_create(size_t size) {
     
     mat->size = size;
 
-    // Calculate required size in bytes for N x N float array
-    size_t num_bytes = size * size * sizeof(float);
+    // size rounded to nearest multiple of BLOCK_SIZE (64)
+    mat->padded_size = ((size + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
+
+    // Calculate required size in bytes using padded size
+    size_t num_bytes = mat->padded_size * mat->padded_size * sizeof(float);
 
     // Allocate the 32-byte aligned memory for the matrix data
     void *aligned_ptr = NULL;
@@ -61,10 +64,10 @@ void matrix_randomize(matrix_t *mat) {
         return;
     }
 
-    size_t total_elements = mat->size * mat->size;
-
-    // Populate array with floats between 0.0 and 1.0
-    for (size_t i = 0; i < total_elements; i++) {
-        mat->data[i] = (float)rand() / (float)RAND_MAX;
+    // Use 2D loop up to mat->size to avoid randomizing the padding buffer
+    for (size_t i = 0; i < mat->size; i++) {
+        for (size_t j = 0; j < mat->size; j++) {
+            mat->data[i * mat->padded_size + j] = (float)rand() / (float)RAND_MAX;
+        }
     }
 }
