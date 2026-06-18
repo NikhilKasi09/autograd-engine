@@ -16,17 +16,22 @@ int matrices_match(const matrix_t *expected, const matrix_t *actual) {
     }
 
     size_t N = expected->size;
-    size_t total_elements = N * N;
 
-    //actually compare values now
-    for (size_t i = 0; i < total_elements; i++) {
-        float diff = fabsf(expected->data[i] - actual->data[i]);
+    // Actually compare values now using a 2D loop to skip the padding buffer
+    for (size_t i = 0; i < N; i++) {
+        for (size_t j = 0; j < N; j++) {
+            // Calculate the physical memory index using the padded stride
+            size_t index = i * expected->padded_size + j;
+            
+            float diff = fabsf(expected->data[index] - actual->data[index]);
 
-        if (diff > TOLERANCE) {
-            fprintf(stderr,
-                    "Mismatch at index %zu: expected=%f, actual=%f, diff=%f\n",
-                    i, expected->data[i], actual->data[i], diff);
-            exit(1);
+            if (diff > TOLERANCE) {
+                fprintf(stderr,
+                        "Mismatch at logical [%zu][%zu] (physical index %zu):\n"
+                        "expected=%f, actual=%f, diff=%f\n",
+                        i, j, index, expected->data[index], actual->data[index], diff);
+                exit(1);
+            }
         }
     }
 
