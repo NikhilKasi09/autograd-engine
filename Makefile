@@ -1,6 +1,6 @@
 CC ?= gcc
 
-CFLAGS ?= -Wall -Wextra -Werror -pedantic -O3 -mavx2 -mfma -pthread -Iinclude
+CFLAGS ?= -Wall -Wextra -Werror -pedantic -O3 -mavx2 -mfma -pthread -Iinclude -MMD -MP
 
 LDFLAGS = -lm
 
@@ -8,6 +8,7 @@ TARGET = gemm_benchmark
 
 SRCS = main.c $(wildcard src/*.c)
 OBJS = $(SRCS:.c=.o)
+DEPS = $(SRCS:.c=.d)
 
 all: $(TARGET)
 
@@ -21,3 +22,5 @@ clean:
 	rm -f $(OBJS) $(TARGET)
 
 .PHONY: all clean
+
+-include $(DEPS)
