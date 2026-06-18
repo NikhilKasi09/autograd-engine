@@ -5,6 +5,21 @@
 
 #define BLOCK_SIZE 64
 
+/*
+ Packages the matrix pointers, dimensions, and row boundaries required 
+ for a single worker thread to compute its assigned horizontal slice
+*/
+typedef struct {
+    size_t start_row;
+    size_t end_row;
+    size_t logical_size;
+    size_t stride;
+    
+    const float *A;
+    const float *B;
+    float *C;
+} thread_args_t;
+
 /**
  * @brief Computes the baseline naive matrix multiplication (C = A * B).
  *
