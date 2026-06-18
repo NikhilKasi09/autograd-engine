@@ -45,5 +45,21 @@ void gemm_avx2(const matrix_t *A, const matrix_t *B, matrix_t *C);
  */
 void gemm_tiled(const matrix_t *A, const matrix_t *B, matrix_t *C);
 
+/**
+ * @brief Computes matrix multiplication by fusing a 64x64 Cache-Tiled Architecture with 256-bit AVX2 SIMD intrinsics.
+ *
+ * This function achieves peak CPU throughput by locking sub-blocks into the L1 
+ * hardware cache while vectorizing the innermost computations. It utilizes an 
+ * i-j-k loop reordering to accumulate fused multiply-adds (FMA) entirely within 
+ * hardware registers, eliminating store-forwarding stalls. Furthermore, it strictly 
+ * relies on the 32-byte aligned, zero-padded memory in the matrix_t struct to safely 
+ * execute 256-bit loads and stores without edge-case boundary checks or segmentation faults.
+ *
+ * @param A Pointer to the first input matrix struct (read-only).
+ * @param B Pointer to the second input matrix struct (read-only).
+ * @param C Pointer to the output matrix struct.
+ */
+void gemm_tiled_simd(const matrix_t *A, const matrix_t *B, matrix_t *C);
+
 
 #endif
