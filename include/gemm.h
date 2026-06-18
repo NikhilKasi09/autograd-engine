@@ -6,6 +6,10 @@
 /**
  * @brief Computes the baseline naive matrix multiplication (C = A * B).
  *
+ * This function implements the standard i-j-k nested scalar loop architecture.
+ * It purposefully lacks spatial locality and vectorization to establish a 
+ * worst-case execution time and L1 cache miss baseline for the Mini-BLAS library.
+ *
  * @param A Pointer to the first input matrix struct (read-only).
  * @param B Pointer to the second input matrix struct (read-only).
  * @param C Pointer to the output matrix struct.
@@ -24,6 +28,20 @@ void gemm_naive(const matrix_t *A, const matrix_t *B, matrix_t *C);
  * @param C Pointer to the output matrix struct. Must be zero-initialised before call.
  */
 void gemm_avx2(const matrix_t *A, const matrix_t *B, matrix_t *C);
+
+/**
+ * @brief Computes matrix multiplication using a 64x64 Cache-Tiled Architecture.
+ *
+ * This function divides the matrices into 16KB sub-blocks to ensure 
+ * the working set remains completely resident within the L1 hardware cache 
+ * during computation. It heavily relies on the zero-padded memory allocations 
+ * in the matrix_t struct to bypass edge-case boundary checks.
+ *
+ * @param A Pointer to the first input matrix struct (read-only).
+ * @param B Pointer to the second input matrix struct (read-only).
+ * @param C Pointer to the output matrix struct.
+ */
+void gemm_tiled(const matrix_t *A, const matrix_t *B, matrix_t *C);
 
 
 #endif
