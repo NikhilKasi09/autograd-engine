@@ -1,5 +1,5 @@
-#include "gemm_ikj.h"
 #include <stdio.h>
+#include "gemm.h"
 
 // Private internal kernel
 static void gemm_ikj_kernel(size_t N,

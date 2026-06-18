@@ -1,5 +1,7 @@
 CC ?= gcc
 
+# -mavx2 and -mfma are critical for Seyaan's kernel
+# -pthread is critical for the multithreaded wrapper
 CFLAGS ?= -Wall -Wextra -Werror -pedantic -O3 -mavx2 -mfma -pthread -Iinclude -MMD -MP
 
 LDFLAGS = -lm
@@ -19,7 +21,7 @@ $(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(DEPS) $(TARGET)
 
 .PHONY: all clean
 
