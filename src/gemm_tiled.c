@@ -1,8 +1,7 @@
 #include "gemm.h"
 #include <stdio.h>
 
-
-//Assumes N is a multiple of BLOCK_SIZE - guarenteed my matrix padding
+// Note: 'N' represents the physical padded size, not the logical matrix size
 static void gemm_tiled_kernel(size_t N, const float * restrict A, const float * restrict B, float * restrict C) {
 
     // Outer loops (slide the 64x64 window across the matrices)
@@ -33,5 +32,5 @@ void gemm_tiled(const matrix_t *A, const matrix_t *B, matrix_t *C) {
         fprintf(stderr, "gemm_tiled: matrix size mismatch (%zu, %zu, %zu)\n", A->size, B->size, C->size);
         return; 
     }
-    gemm_tiled_kernel(A->size, A->data, B->data, C->data);
+    gemm_tiled_kernel(A->padded_size, A->data, B->data, C->data);
 }

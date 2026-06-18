@@ -2,13 +2,14 @@
 
 // Private internal kernel
 static void gemm_naive_kernel(size_t N, 
+                              size_t stride,
                               const float * restrict A, 
                               const float * restrict B, 
                               float * restrict C) {
     for (size_t i = 0; i < N; i++) {
         for (size_t j = 0; j < N; j++) {
             for (size_t k = 0; k < N; k++) {
-                C[i * N + j] += A[i * N + k] * B[k * N + j];
+                C[i * stride + j] += A[i * stride + k] * B[k * stride + j];
             }
         }
     }
@@ -22,5 +23,5 @@ void gemm_naive(const matrix_t *A, const matrix_t *B, matrix_t *C) {
     }
 
     // Extract the size and raw data pointers
-    gemm_naive_kernel(A->size, A->data, B->data, C->data);
+    gemm_naive_kernel(A->size, A->padded_size, A->data, B->data, C->data);
 }
