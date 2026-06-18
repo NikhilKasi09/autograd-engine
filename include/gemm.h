@@ -3,6 +3,8 @@
 
 #include "matrix.h"
 
+#define BLOCK_SIZE 64
+
 /**
  * @brief Computes the baseline naive matrix multiplication (C = A * B).
  *
