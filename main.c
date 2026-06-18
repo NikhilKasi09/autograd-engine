@@ -3,10 +3,9 @@
 #include <string.h>
 #include "matrix.h"
 #include "gemm.h"
-#include "gemm_ikj.h"
 #include "benchmark.h"
+#include "validate.h"
 
-// Wrapper to adapt the 4-argument pthread kernel to the 3-argument function pointer
 void gemm_multithreaded_wrapper(const matrix_t *A, const matrix_t *B, matrix_t *C) {
     // Spawning 8 threads for the benchmark run
     gemm_multithreaded(A, B, C, 8); 
@@ -19,7 +18,6 @@ typedef struct {
 } kernel_info_t;
 
 int main() {
-    // Task 12 spec: 256, 512, 1024
     size_t sizes[] = {256, 512, 1024};
     int num_sizes = sizeof(sizes) / sizeof(sizes[0]);
 
@@ -38,8 +36,9 @@ int main() {
         matrix_t *A = matrix_create(N);
         matrix_t *B = matrix_create(N);
         matrix_t *C = matrix_create(N);
+        matrix_t *expected_C = matrix_create(N);
 
-        if (!A || !B || !C) {
+        if (!A || !B || !C || !expected_C) {
             fprintf(stderr, "Fatal: Memory allocation failed for size %zu\n", N);
             return 1;
         }
@@ -56,18 +55,24 @@ int main() {
         double final_time = 0.0;
 
         for (int k = 0; k < num_kernels; k++) {
-            // Run Nikhil's Benchmark (assuming you added the memset fix!)
+            // Run the benchmark
             benchmark_result_t res = run_benchmark(kernels[k].func, A, B, C);
 
-            // Capture times for the Total Speedup calculation
             if (k == 0) {
+                // If this is the Naive run, save its output as the ultimate source of truth
+                memcpy(expected_C->data, C->data, C->padded_size * C->padded_size * sizeof(float));
                 naive_time = res.elapsed_seconds;
+            } else {
+                // For all other kernels, prove they match the Naive output
+                // (This will automatically exit(1) and crash if there is floating point drift)
+                matrices_match(expected_C, C);
             }
+
             if (k == num_kernels - 1) {
                 final_time = res.elapsed_seconds;
             }
 
-            // Print formatted row (converting seconds to ms)
+            // Print formatted row
             printf("%d. %-15s | %-9.2f | %.2f GFLOP/s\n", 
                    k + 1,
                    kernels[k].name, 
@@ -80,9 +85,11 @@ int main() {
         double total_speedup = (final_time > 0.0) ? (naive_time / final_time) : 0.0;
         printf("Total Speedup: %.1fx\n\n", total_speedup);
 
+        // Free all dynamically allocated memory
         matrix_free(A);
         matrix_free(B);
         matrix_free(C);
+        matrix_free(expected_C); 
     }
 
     return 0;
