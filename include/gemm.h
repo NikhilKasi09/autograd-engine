@@ -94,5 +94,7 @@ void gemm_tiled_simd(const matrix_t *A, const matrix_t *B, matrix_t *C);
  */
 void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int num_threads);
 
+void gemm_ikj(const matrix_t *A, const matrix_t *B, matrix_t *C);
+
 
 #endif
