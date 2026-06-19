@@ -8,32 +8,99 @@
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 static void gemm_worker_kernel(size_t start_row, size_t end_row,
-                                size_t logical_size, size_t stride,
-                                const float * restrict A,
-                                const float * restrict B,
-                                float * restrict C) {
+                               size_t logical_size, size_t stride,
+                               const float * restrict A,
+                               const float * restrict B,
+                               float * restrict C) {
 
     for (size_t block_i = start_row; block_i < end_row; block_i += BLOCK_SIZE) {
         for (size_t block_k = 0; block_k < logical_size; block_k += BLOCK_SIZE) {
             for (size_t block_j = 0; block_j < logical_size; block_j += BLOCK_SIZE) {
 
-                // Clamp to this thread's row boundary (not just the matrix's), since start_row/end_row need not be aligned to BLOCK_SIZE.
+                // Clamp to this thread's row boundary
                 size_t end_i = MIN(block_i + BLOCK_SIZE, end_row);
                 size_t end_k = MIN(block_k + BLOCK_SIZE, logical_size);
                 size_t end_j = MIN(block_j + BLOCK_SIZE, logical_size);
 
-                for (size_t i = block_i; i < end_i; i++) {
+                size_t i = block_i;
+
+                // 2D Register Block: Unroll 'i' by 4, and 'j' by 16 (2 vectors)
+                for (; i <= end_i - 4; i += 4) {
+                    size_t j = block_j;
+                    
+                    for (; j <= end_j - 16; j += 16) {
+                        
+                        __m256 c00 = _mm256_load_ps(&C[(i + 0) * stride + j + 0]);
+                        __m256 c01 = _mm256_load_ps(&C[(i + 0) * stride + j + 8]);
+                        __m256 c10 = _mm256_load_ps(&C[(i + 1) * stride + j + 0]);
+                        __m256 c11 = _mm256_load_ps(&C[(i + 1) * stride + j + 8]);
+                        __m256 c20 = _mm256_load_ps(&C[(i + 2) * stride + j + 0]);
+                        __m256 c21 = _mm256_load_ps(&C[(i + 2) * stride + j + 8]);
+                        __m256 c30 = _mm256_load_ps(&C[(i + 3) * stride + j + 0]);
+                        __m256 c31 = _mm256_load_ps(&C[(i + 3) * stride + j + 8]);
+                        
+                        for (size_t k = block_k; k < end_k; k++) {
+                            __m256 b0 = _mm256_load_ps(&B[k * stride + j + 0]);
+                            __m256 b1 = _mm256_load_ps(&B[k * stride + j + 8]);
+                            
+                            __m256 a0 = _mm256_set1_ps(A[(i + 0) * stride + k]);
+                            c00 = _mm256_fmadd_ps(a0, b0, c00);
+                            c01 = _mm256_fmadd_ps(a0, b1, c01);
+                            
+                            __m256 a1 = _mm256_set1_ps(A[(i + 1) * stride + k]);
+                            c10 = _mm256_fmadd_ps(a1, b0, c10);
+                            c11 = _mm256_fmadd_ps(a1, b1, c11);
+                            
+                            __m256 a2 = _mm256_set1_ps(A[(i + 2) * stride + k]);
+                            c20 = _mm256_fmadd_ps(a2, b0, c20);
+                            c21 = _mm256_fmadd_ps(a2, b1, c21);
+                            
+                            __m256 a3 = _mm256_set1_ps(A[(i + 3) * stride + k]);
+                            c30 = _mm256_fmadd_ps(a3, b0, c30);
+                            c31 = _mm256_fmadd_ps(a3, b1, c31);
+                        }
+                        
+                        _mm256_store_ps(&C[(i + 0) * stride + j + 0], c00);
+                        _mm256_store_ps(&C[(i + 0) * stride + j + 8], c01);
+                        _mm256_store_ps(&C[(i + 1) * stride + j + 0], c10);
+                        _mm256_store_ps(&C[(i + 1) * stride + j + 8], c11);
+                        _mm256_store_ps(&C[(i + 2) * stride + j + 0], c20);
+                        _mm256_store_ps(&C[(i + 2) * stride + j + 8], c21);
+                        _mm256_store_ps(&C[(i + 3) * stride + j + 0], c30);
+                        _mm256_store_ps(&C[(i + 3) * stride + j + 8], c31);
+                    }
+                    
+                    // j clean-up loop
+                    for (; j < end_j; j += 8) {
+                        __m256 c0 = _mm256_load_ps(&C[(i + 0) * stride + j]);
+                        __m256 c1 = _mm256_load_ps(&C[(i + 1) * stride + j]);
+                        __m256 c2 = _mm256_load_ps(&C[(i + 2) * stride + j]);
+                        __m256 c3 = _mm256_load_ps(&C[(i + 3) * stride + j]);
+                        
+                        for (size_t k = block_k; k < end_k; k++) {
+                            __m256 b_vec = _mm256_load_ps(&B[k * stride + j]);
+                            c0 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 0) * stride + k]), b_vec, c0);
+                            c1 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 1) * stride + k]), b_vec, c1);
+                            c2 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 2) * stride + k]), b_vec, c2);
+                            c3 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 3) * stride + k]), b_vec, c3);
+                        }
+                        
+                        _mm256_store_ps(&C[(i + 0) * stride + j], c0);
+                        _mm256_store_ps(&C[(i + 1) * stride + j], c1);
+                        _mm256_store_ps(&C[(i + 2) * stride + j], c2);
+                        _mm256_store_ps(&C[(i + 3) * stride + j], c3);
+                    }
+                }
+
+                // i clean-up loop
+                for (; i < end_i; i++) {
                     for (size_t j = block_j; j < end_j; j += 8) {
-
                         __m256 c_vec = _mm256_load_ps(&C[i * stride + j]);
-
                         for (size_t k = block_k; k < end_k; k++) {
                             __m256 a_broadcast = _mm256_set1_ps(A[i * stride + k]);
                             __m256 b_vec       = _mm256_load_ps(&B[k * stride + j]);
-
                             c_vec = _mm256_fmadd_ps(a_broadcast, b_vec, c_vec);
                         }
-
                         _mm256_store_ps(&C[i * stride + j], c_vec);
                     }
                 }
@@ -88,7 +155,7 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
         return;
     }
 
-    //  Slice C horizontally by row, evening out the remainder 
+    // Slice C horizontally by row, evening out the remainder 
     size_t base_rows   = logical_size / nthreads;
     size_t remainder   = logical_size % nthreads;
     size_t current_row = 0;
@@ -119,7 +186,7 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
         spawned++;
     }
 
-    // Join whichever threads actually got created, even if one failed midway, so we never leak running threads or join uninitialised pthread_t values.
+    // Join whichever threads actually got created
     for (size_t t = 0; t < spawned; t++) {
         pthread_join(threads[t], NULL);
     }
