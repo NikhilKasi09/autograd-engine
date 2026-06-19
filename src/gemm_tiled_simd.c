@@ -21,25 +21,23 @@ static void gemm_tiled_simd_kernel(size_t logical_size, size_t stride,
                 size_t end_k = MIN(block_k + BLOCK_SIZE, logical_size);
                 size_t end_j = MIN(block_j + BLOCK_SIZE, logical_size);
 
-                // INNER LOOPS: Hardware SIMD Execution (i-j-k order to prevent store stalls)
+                // INNER LOOPS: i-k-j order restores spatial locality and prevents TLB thrashing
                 for (size_t i = block_i; i < end_i; i++) {
-                    
-                    // j steps by 8 floats (256-bit AVX2 vectors)
-                    for (size_t j = block_j; j < end_j; j += 8) {
+                    for (size_t k = block_k; k < end_k; k++) {
                         
-                        // Load 8 floats from C into a register exactly once per block
-                        __m256 c_vec = _mm256_load_ps(&C[i * stride + j]);
-
-                        // Accumulate the K-dimension Fused-Multiply Adds inside the silicon
-                        for (size_t k = block_k; k < end_k; k++) {
-                            __m256 a_broadcast = _mm256_set1_ps(A[i * stride + k]);
-                            __m256 b_vec       = _mm256_load_ps(&B[k * stride + j]);
+                        __m256 a_broadcast = _mm256_set1_ps(A[i * stride + k]);
+                        
+                        // j steps by 8 floats - purely sequential memory access!
+                        for (size_t j = block_j; j < end_j; j += 8) {
+                            
+                            // Load C, Load B, Multiply-Add, Store C
+                            __m256 c_vec = _mm256_load_ps(&C[i * stride + j]);
+                            __m256 b_vec = _mm256_load_ps(&B[k * stride + j]);
                             
                             c_vec = _mm256_fmadd_ps(a_broadcast, b_vec, c_vec);
+                            
+                            _mm256_store_ps(&C[i * stride + j], c_vec);
                         }
-
-                        // Write back the accumulated 8 floats to C exactly once
-                        _mm256_store_ps(&C[i * stride + j], c_vec);
                     }
                 }
             }
