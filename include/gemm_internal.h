@@ -18,6 +18,29 @@
 #define GEMM_VEC   8  /* floats in one AVX2 vector              */
 
 /*
+ The cache-tiled scalar kernel, shared rather than private to gemm_tiled.c.
+
+ C(MxN) += A(MxK) * B(KxN), row-major, any extents, no alignment or multiple-of
+ requirements at all. The vector kernels call this for the ragged strips they
+ cannot cover with whole vectors, so those edges reuse code that has already
+ been tested on its own instead of growing a second set of hand-written edge
+ loops.
+
+ It is called on offset pointers for that: a caller wanting the sub-rectangle
+ of C starting at (i0, j0) passes A + i0*lda + k0, B + k0*ldb + j0 and
+ C + i0*ldc + j0 with the extents of the piece it wants. The leading dimensions
+ stay those of the full matrices.
+
+ Being tiled rather than a plain triple loop matters for those strips: an
+ untiled Mx7xK strip at M = K = 1024 walks B down a column and can cost
+ milliseconds against a main kernel that takes about twenty.
+*/
+void gemm_tiled_kernel(size_t M, size_t N, size_t K,
+                       const float * restrict A, size_t lda,
+                       const float * restrict B, size_t ldb,
+                       float * restrict C, size_t ldc);
+
+/*
  The shape contract for C(MxN) += A(MxK) * B(KxN): the product has to be
  defined and C has to be the right shape to hold it. Every wrapper calls this.
 

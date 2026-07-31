@@ -4,31 +4,58 @@
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-// logical_size is the matrix dimension and stride is the distance between
-// rows. They were the same thing back when every allocation was padded, which
-// is why the old comment here claimed this parameter was the padded size.
-static void gemm_tiled_kernel(size_t logical_size, size_t stride,
-                              const float * restrict A, const float * restrict B, 
-                              float * restrict C) {
+/*
+ Cache-tiled scalar kernel. Declared in gemm_internal.h rather than being
+ private here, because the vector kernels call it for their ragged edges.
 
-    // Outer loops (slide the 64x64 window across the matrices)
-    for (size_t block_i = 0; block_i < logical_size; block_i += BLOCK_SIZE) {
-        for (size_t block_k = 0; block_k < logical_size; block_k += BLOCK_SIZE) {
-            for (size_t block_j = 0; block_j < logical_size; block_j += BLOCK_SIZE) {
+ The three tile loops are independent now. Each one walks its own dimension and
+ works out its own extent, so a trailing tile is simply smaller than the rest
+ in whichever dimensions happen to be ragged. There is no requirement that M, N
+ and K relate to each other or to BLOCK_SIZE in any way.
 
-                // Clamp the inner loops to ensure we stop at the logical edge
-                size_t end_i = MIN(block_i + BLOCK_SIZE, logical_size);
-                size_t end_k = MIN(block_k + BLOCK_SIZE, logical_size);
-                size_t end_j = MIN(block_j + BLOCK_SIZE, logical_size);
+ Note the extents are worked out as counts rather than as clamped absolute
+ indices:
 
-                // Inner loops (calculate inside the current window)
-                for (size_t i = block_i; i < end_i; i++) {
-                    for (size_t k = block_k; k < end_k; k++) {
-                        
-                        float a_ik = A[i * stride + k];
+     const size_t mt = MIN(BLOCK_SIZE, M - block_i);
 
-                        for (size_t j = block_j; j < end_j; j++) {
-                            C[i * stride + j] += a_ik * B[k * stride + j];
+ Since block_i < M is the loop condition, M - block_i cannot underflow. The
+ alternative, clamping block_i + BLOCK_SIZE against M and then subtracting,
+ is where unsigned arithmetic goes wrong in this file's neighbours.
+
+ Working inside the tile on offset pointers keeps the inner loops free of
+ block_i and block_j entirely, so what is left reads as a small dense GEMM,
+ which is exactly what it is.
+*/
+void gemm_tiled_kernel(size_t M, size_t N, size_t K,
+                       const float * restrict A, size_t lda,
+                       const float * restrict B, size_t ldb,
+                       float * restrict C, size_t ldc) {
+
+    // Outer loops slide the 64x64 window across the matrices
+    for (size_t block_i = 0; block_i < M; block_i += BLOCK_SIZE) {
+        const size_t mt = MIN(BLOCK_SIZE, M - block_i);
+
+        for (size_t block_k = 0; block_k < K; block_k += BLOCK_SIZE) {
+            const size_t kt = MIN(BLOCK_SIZE, K - block_k);
+
+            for (size_t block_j = 0; block_j < N; block_j += BLOCK_SIZE) {
+                const size_t nt = MIN(BLOCK_SIZE, N - block_j);
+
+                // Top left corner of this tile in each matrix. The leading
+                // dimensions stay those of the full matrices.
+                const float *A_tile = A + block_i * lda + block_k;
+                const float *B_tile = B + block_k * ldb + block_j;
+                float       *C_tile = C + block_i * ldc + block_j;
+
+                // Inner loops, in ikj order so the innermost one walks B and C
+                // along their rows
+                for (size_t i = 0; i < mt; i++) {
+                    for (size_t k = 0; k < kt; k++) {
+
+                        float a_ik = A_tile[i * lda + k];
+
+                        for (size_t j = 0; j < nt; j++) {
+                            C_tile[i * ldc + j] += a_ik * B_tile[k * ldb + j];
                         }
                     }
                 }
@@ -37,10 +64,14 @@ static void gemm_tiled_kernel(size_t logical_size, size_t stride,
     }
 }
 
-
 void gemm_tiled(const matrix_t *A, const matrix_t *B, matrix_t *C) {
-    if (!gemm_shapes_square_ok("gemm_tiled", A, B, C)) {
+    if (!gemm_check_shapes("gemm_tiled", A, B, C)) {
         return;
     }
-    gemm_tiled_kernel(A->rows, A->stride, A->data, B->data, C->data);
+
+    // M and N come from C, K is the inner dimension the two operands share
+    gemm_tiled_kernel(C->rows, C->cols, A->cols,
+                      A->data, A->stride,
+                      B->data, B->stride,
+                      C->data, C->stride);
 }

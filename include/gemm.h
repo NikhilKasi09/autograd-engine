@@ -68,8 +68,11 @@ void gemm_avx2(const matrix_t *A, const matrix_t *B, matrix_t *C);
  *
  * This function divides the matrices into 16KB sub-blocks to ensure
  * the working set remains completely resident within the L1 hardware cache
- * during computation. The tile loops clamp against the matrix dimensions, so
- * a trailing tile is simply smaller than the rest.
+ * during computation. The three tile loops clamp independently against M, N and
+ * K, so a trailing tile is simply smaller than the rest in whichever
+ * dimensions are ragged.
+ *
+ * Accepts any M, N and K.
  *
  * @param A Pointer to the first input matrix struct (read-only).
  * @param B Pointer to the second input matrix struct (read-only).
