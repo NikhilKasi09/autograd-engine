@@ -18,15 +18,21 @@
 #define GEMM_VEC   8  /* floats in one AVX2 vector              */
 
 /*
- Shape check shared by all six wrappers.
-
- The kernel bodies are still square only, so they take a single N and a single
- stride for all three matrices, and the wrappers have to reject anything else
- rather than compute nonsense. This gets replaced by the general
- gemm_check_shapes at step C, as each kernel learns to handle M, N and K
- separately.
+ The shape contract for C(MxN) += A(MxK) * B(KxN): the product has to be
+ defined and C has to be the right shape to hold it. Every wrapper calls this.
 
  Returns 1 if the shapes are usable, 0 otherwise, and reports on stderr.
+*/
+int gemm_check_shapes(const char *who, const matrix_t *A, const matrix_t *B,
+                      const matrix_t *C);
+
+/*
+ The stronger check the kernels that are still square only need. They take a
+ single N and a single stride for all three matrices, so anything rectangular
+ has to be turned away rather than quietly miscomputed.
+
+ Each kernel drops this for plain gemm_check_shapes as it is generalised, and
+ the function goes away entirely at step H.
 */
 int gemm_shapes_square_ok(const char *who, const matrix_t *A, const matrix_t *B,
                           const matrix_t *C);

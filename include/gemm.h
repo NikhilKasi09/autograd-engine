@@ -4,9 +4,17 @@
 #include "matrix.h"
 
 /*
+ All matrices are row-major, and every kernel computes C += A * B rather than
+ C = A * B. C has to be zeroed by the caller if the plain product is what is
+ wanted, and accumulating is what the backward pass will rely on later.
+
  None of these kernels may be called with C aliasing A or B. The inner loops
  are written with restrict pointers, so gemm(A, B, A) is undefined behaviour
  rather than a slow path.
+
+ Kernels are being generalised from square-only to arbitrary M, N and K one at
+ a time. Each one below says what it currently accepts, and its wrapper
+ reports on stderr and returns without touching C if given anything else.
 */
 
 /*
@@ -28,8 +36,10 @@ typedef struct {
  * @brief Computes the baseline naive matrix multiplication (C = A * B).
  *
  * This function implements the standard i-j-k nested scalar loop architecture.
- * It purposefully lacks spatial locality and vectorization to establish a 
+ * It purposefully lacks spatial locality and vectorization to establish a
  * worst-case execution time and L1 cache miss baseline for the Mini-BLAS library.
+ *
+ * Accepts any M, N and K, including degenerate ones such as 1xNx1.
  *
  * @param A Pointer to the first input matrix struct (read-only).
  * @param B Pointer to the second input matrix struct (read-only).

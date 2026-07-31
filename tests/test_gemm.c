@@ -273,18 +273,20 @@ typedef struct {
 } kernel_entry_t;
 
 /*
- Masks follow the capability table in PLAN.md, currently the step B column.
- They burn down to zero over steps C to H, so this array doubles as the
+ Masks follow the capability table in PLAN.md, currently the step C column.
+ They burn down to zero over steps D to H, so this array doubles as the
  progress tracker.
 
- N_MULT8 arrives for the three SIMD kernels at step B. Those kernels step the
+ naive is first out, and is now the only kernel that runs the whole table.
+
+ N_MULT8 arrived for the three SIMD kernels at step B. Those kernels step the
  j loop in whole vectors with no scalar tail, and 63, 65 and 127 only ever
  worked because the allocator quietly rounded the stride up to 64 or 128. With
  stride == cols the vector loop would run off the end of the row, so the
  wrappers reject those shapes until steps F and G put the tails in.
 */
 static const kernel_entry_t kernels[] = {
-    {"naive",      gemm_naive,      RESTRICT_SQUARE,                                        0},
+    {"naive",      gemm_naive,      0,                                                      0},
     {"ikj",        gemm_ikj,        RESTRICT_SQUARE,                                        0},
     {"tiled",      gemm_tiled,      RESTRICT_SQUARE,                                        0},
     {"avx2",       gemm_avx2,       RESTRICT_SQUARE | RESTRICT_N_MULT8,                     0},
@@ -308,24 +310,37 @@ typedef struct {
 } shape_t;
 
 /*
- Square only for now, since matrix_create cannot express anything else yet.
- This gets replaced by the full list in PLAN.md at step C, once gemm_naive
- has been generalised.
+ Each dimension independently crosses the vector width (8), the register block
+ (4 and 16) and the tile boundary (64), because a bug that only shows up when
+ two dimensions are ragged at once is the whole risk here.
 
- N = 8 is left out on purpose. gemm_tiled_simd computes 'j <= end_j - 16', so
- at N = 8 the first tile gives end_j = 8 and 8 - 16 wraps round to SIZE_MAX-7,
- which sends the loop off unbounded. Any N < 16 is already broken today and
- step A is not trying to fix it, so those shapes join the table at step C
- behind RESTRICT_N_MIN16.
+ The shapes that would send a kernel off unbounded, such as anything with
+ N < 16 for gemm_tiled_simd, are in the table from now on and held back by the
+ restriction masks rather than by being left out. That way the day a mask is
+ cleared, the shape it was hiding gets run.
 */
 static const shape_t shapes[] = {
+    {  1,   1,   1}, /* degenerate                                */
+    {  1, 512,   1}, /* single row, long N                        */
+    {  1, 128,  64}, /* M below the register block                */
+    { 64,  96,   1}, /* K = 1, a rank-1 update                    */
+    {  3,   5,   7}, /* every dimension below every block size    */
+    {  4,  16,   8}, /* exactly one register block                */
+    {  5,  17,   9}, /* one above each of 4, 16 and 8             */
+    {  7,   7,   7}, /* below one vector                          */
+    {  8,   8,   8}, /* exactly one vector                        */
+    {  9,  15,  33}, /* mixed                                     */
     { 16,  16,  16},
-    { 63,  63,  63},
-    { 64,  64,  64},
-    { 65,  65,  65},
+    { 17,  31,  13}, /* N < 16, the j underflow probe             */
+    { 63,  63,  63}, /* one below the tile                        */
+    { 63,  65,  64}, /* mixed around the tile                     */
+    { 64,  64,  64}, /* exactly one tile                          */
+    { 65,  65,  65}, /* one above, so the last tile is 1x1x1      */
     {127, 127, 127},
     {128, 128, 128},
-    {256, 256, 256}
+    {129, 130, 131}, /* ragged in all three dimensions            */
+    {128, 256, 512}, /* non-square, tile aligned                  */
+    {256, 256, 256}  /* square, tile aligned                      */
 };
 static const size_t num_shapes = sizeof(shapes) / sizeof(shapes[0]);
 
@@ -366,8 +381,7 @@ static size_t run_shape(shape_t s, const char *filter, tally_t *tally) {
     }
 
     if (!A || !B) {
-        // Non-square operands cannot be built until step B
-        printf("SKIP %-11s %4zux%4zux%4zu [%-5s] alloc-nonsquare\n", "*all*", M, N, K, "-");
+        printf("SKIP %-11s %4zux%4zux%4zu [%-5s] alloc-failed\n", "*all*", M, N, K, "-");
         tally->skipped += num_kernels * 2;
         matrix_free(A);
         matrix_free(B);
@@ -473,23 +487,112 @@ static size_t run_shape(shape_t s, const char *filter, tally_t *tally) {
  combination of edges, which is exactly what this phase is about, and each
  iteration is at most 2*80^3 = 1.0 MFLOP so the whole run costs about a second.
 
- Sizes are square for now because matrix_create cannot express anything else.
- Step C switches this to independent M, N and K draws.
+ M, N and K are drawn independently, so the ragged combinations that no
+ handwritten table would think to include get covered.
 */
 static size_t run_fuzz(const char *filter, tally_t *tally) {
     size_t failures = 0;
 
-    printf("\n--- fuzz: %d random square shapes in [1,%d] ---\n", FUZZ_ITERS, FUZZ_MAX_DIM);
+    printf("\n--- fuzz: %d random shapes with M, N, K in [1,%d] ---\n", FUZZ_ITERS,
+           FUZZ_MAX_DIM);
 
     srand((unsigned)SEED);
     for (int it = 0; it < FUZZ_ITERS; it++) {
-        const size_t n = (size_t)(rand() % FUZZ_MAX_DIM) + 1u;
         shape_t s;
-        s.M = s.N = s.K = n;
+        s.M = (size_t)(rand() % FUZZ_MAX_DIM) + 1u;
+        s.N = (size_t)(rand() % FUZZ_MAX_DIM) + 1u;
+        s.K = (size_t)(rand() % FUZZ_MAX_DIM) + 1u;
         // run_shape reseeds from the dimensions, so a fuzz failure can be
         // reproduced from the shape alone
         failures += run_shape(s, filter, tally);
     }
+    return failures;
+}
+
+/*
+ One case checked against values worked out by hand rather than against
+ reference_gemm, so that the reference itself is pinned to something.
+
+   A = [ 1  2  3  4 ]      B = [ 1  2 ]      C = [  50   60 ]
+       [ 5  6  7  8 ]          [ 3  4 ]          [ 114  140 ]
+       [ 9 10 11 12 ]          [ 5  6 ]          [ 178  220 ]
+                               [ 7  8 ]
+
+ 3x2x4 is non-square in all three dimensions, and every value here is exactly
+ representable in a float, so this compares exactly rather than with a
+ tolerance. Runs against every kernel the restrictions allow, which is naive
+ alone at step C and grows as the masks clear.
+*/
+static size_t run_known_values(const char *filter, tally_t *tally) {
+    static const float a_vals[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    static const float b_vals[8]  = {1, 2, 3, 4, 5, 6, 7, 8};
+    static const float expected[6] = {50, 60, 114, 140, 178, 220};
+
+    const size_t M = 3, N = 2, K = 4;
+    size_t failures = 0;
+
+    printf("\n--- hand-checked 3x2x4 ---\n");
+
+    matrix_t *A = mat_new(M, K);
+    matrix_t *B = mat_new(K, N);
+    if (!A || !B) {
+        fprintf(stderr, "FATAL: allocation failed in run_known_values\n");
+        exit(2);
+    }
+    scatter_to_matrix(A, a_vals, M, K);
+    scatter_to_matrix(B, b_vals, K, N);
+
+    for (size_t k = 0; k < num_kernels; k++) {
+        const kernel_entry_t *ke = &kernels[k];
+
+        if (filter && !strstr(ke->name, filter)) {
+            continue;
+        }
+
+        const char *why = restriction_violated(ke->restrictions, M, N, K, ke->nthreads);
+        if (why) {
+            printf("SKIP %-11s %4zux%4zux%4zu [%-5s] %s\n", ke->name, M, N, K, "exact", why);
+            tally->skipped++;
+            continue;
+        }
+
+        matrix_t *C = mat_new(M, N);
+        if (!C) {
+            fprintf(stderr, "FATAL: allocation failed in run_known_values\n");
+            exit(2);
+        }
+        matrix_zero(C);
+
+        ke->func(A, B, C);
+
+        bool ok = true;
+        for (size_t i = 0; i < M && ok; i++) {
+            for (size_t j = 0; j < N && ok; j++) {
+                const float got = C->data[i * mat_stride(C) + j];
+                if (got != expected[i * N + j]) {
+                    printf("FAIL %-11s %4zux%4zux%4zu [%-5s] at [%zu][%zu] "
+                           "expected=%.1f actual=%.1f\n",
+                           ke->name, M, N, K, "exact", i, j, (double)expected[i * N + j],
+                           (double)got);
+                    ok = false;
+                }
+            }
+        }
+
+        if (ok) {
+            printf("PASS %-11s %4zux%4zux%4zu [%-5s] exact match\n", ke->name, M, N, K,
+                   "exact");
+            tally->passed++;
+        } else {
+            failures++;
+            tally->failed++;
+        }
+
+        matrix_free(C);
+    }
+
+    matrix_free(A);
+    matrix_free(B);
     return failures;
 }
 
@@ -520,6 +623,8 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < num_shapes; i++) {
         failures += run_shape(shapes[i], filter, &tally);
     }
+
+    failures += run_known_values(filter, &tally);
 
     if (fuzz) {
         tally.quiet = true; // one line per shape and kernel would be 5000 lines
