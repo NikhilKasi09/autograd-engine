@@ -122,6 +122,8 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
  * row k of B for each middle-loop iteration, the innermost j loop walks through B and
  * C sequentially in row-major order. This basically eliminates the cache misses by exploting spatial locality.
  *
+ * Accepts any M, N and K.
+ *
  * @param A Pointer to the first input matrix struct (read-only).
  * @param B Pointer to the second input matrix struct (read-only).
  * @param C Pointer to the output matrix struct. Must be zero-initialised before call,
