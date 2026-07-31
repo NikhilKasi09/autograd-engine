@@ -1,0 +1,5 @@
+*.o
+*.d
+
+gemm_benchmark
+gemm_tests

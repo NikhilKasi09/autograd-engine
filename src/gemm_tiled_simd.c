@@ -4,7 +4,14 @@
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-static void gemm_tiled_simd_kernel(size_t logical_size, size_t stride, 
+// Every load and store below is the unaligned form. posix_memalign only aligns
+// the base pointer, whereas each access here addresses row i at
+// data + i * stride, which is 32-byte aligned only when stride % 8 == 0. That
+// holds today because matrix_create rounds every dimension up to a multiple of
+// BLOCK_SIZE, but step B drops the padding and makes stride equal to cols, and
+// then no row past the first can be assumed aligned. vmovups on an aligned
+// address runs at the same speed as vmovaps on AVX2, so this costs nothing.
+static void gemm_tiled_simd_kernel(size_t logical_size, size_t stride,
                                    const float * restrict A, 
                                    const float * restrict B, 
                                    float * restrict C) {
@@ -27,19 +34,19 @@ static void gemm_tiled_simd_kernel(size_t logical_size, size_t stride,
                     for (; j <= end_j - 16; j += 16) {
                         
                         // Load 8 contiguous vectors of C into YMM registers
-                        __m256 c00 = _mm256_load_ps(&C[(i + 0) * stride + j + 0]);
-                        __m256 c01 = _mm256_load_ps(&C[(i + 0) * stride + j + 8]);
-                        __m256 c10 = _mm256_load_ps(&C[(i + 1) * stride + j + 0]);
-                        __m256 c11 = _mm256_load_ps(&C[(i + 1) * stride + j + 8]);
-                        __m256 c20 = _mm256_load_ps(&C[(i + 2) * stride + j + 0]);
-                        __m256 c21 = _mm256_load_ps(&C[(i + 2) * stride + j + 8]);
-                        __m256 c30 = _mm256_load_ps(&C[(i + 3) * stride + j + 0]);
-                        __m256 c31 = _mm256_load_ps(&C[(i + 3) * stride + j + 8]);
+                        __m256 c00 = _mm256_loadu_ps(&C[(i + 0) * stride + j + 0]);
+                        __m256 c01 = _mm256_loadu_ps(&C[(i + 0) * stride + j + 8]);
+                        __m256 c10 = _mm256_loadu_ps(&C[(i + 1) * stride + j + 0]);
+                        __m256 c11 = _mm256_loadu_ps(&C[(i + 1) * stride + j + 8]);
+                        __m256 c20 = _mm256_loadu_ps(&C[(i + 2) * stride + j + 0]);
+                        __m256 c21 = _mm256_loadu_ps(&C[(i + 2) * stride + j + 8]);
+                        __m256 c30 = _mm256_loadu_ps(&C[(i + 3) * stride + j + 0]);
+                        __m256 c31 = _mm256_loadu_ps(&C[(i + 3) * stride + j + 8]);
                         
                         for (size_t k = block_k; k < end_k; k++) {
                             // Load B twice. We use these EXACT SAME vectors 4 times! (Bandwidth saver)
-                            __m256 b0 = _mm256_load_ps(&B[k * stride + j + 0]);
-                            __m256 b1 = _mm256_load_ps(&B[k * stride + j + 8]);
+                            __m256 b0 = _mm256_loadu_ps(&B[k * stride + j + 0]);
+                            __m256 b1 = _mm256_loadu_ps(&B[k * stride + j + 8]);
                             
                             __m256 a0 = _mm256_set1_ps(A[(i + 0) * stride + k]);
                             c00 = _mm256_fmadd_ps(a0, b0, c00);
@@ -59,48 +66,48 @@ static void gemm_tiled_simd_kernel(size_t logical_size, size_t stride,
                         }
                         
                         // Store the 8 calculated vectors back to C
-                        _mm256_store_ps(&C[(i + 0) * stride + j + 0], c00);
-                        _mm256_store_ps(&C[(i + 0) * stride + j + 8], c01);
-                        _mm256_store_ps(&C[(i + 1) * stride + j + 0], c10);
-                        _mm256_store_ps(&C[(i + 1) * stride + j + 8], c11);
-                        _mm256_store_ps(&C[(i + 2) * stride + j + 0], c20);
-                        _mm256_store_ps(&C[(i + 2) * stride + j + 8], c21);
-                        _mm256_store_ps(&C[(i + 3) * stride + j + 0], c30);
-                        _mm256_store_ps(&C[(i + 3) * stride + j + 8], c31);
+                        _mm256_storeu_ps(&C[(i + 0) * stride + j + 0], c00);
+                        _mm256_storeu_ps(&C[(i + 0) * stride + j + 8], c01);
+                        _mm256_storeu_ps(&C[(i + 1) * stride + j + 0], c10);
+                        _mm256_storeu_ps(&C[(i + 1) * stride + j + 8], c11);
+                        _mm256_storeu_ps(&C[(i + 2) * stride + j + 0], c20);
+                        _mm256_storeu_ps(&C[(i + 2) * stride + j + 8], c21);
+                        _mm256_storeu_ps(&C[(i + 3) * stride + j + 0], c30);
+                        _mm256_storeu_ps(&C[(i + 3) * stride + j + 8], c31);
                     }
                     
                     // j clean-up loop for the remaining 8 floats if end_j isn't perfectly divisible by 16
                     for (; j < end_j; j += 8) {
-                        __m256 c0 = _mm256_load_ps(&C[(i + 0) * stride + j]);
-                        __m256 c1 = _mm256_load_ps(&C[(i + 1) * stride + j]);
-                        __m256 c2 = _mm256_load_ps(&C[(i + 2) * stride + j]);
-                        __m256 c3 = _mm256_load_ps(&C[(i + 3) * stride + j]);
+                        __m256 c0 = _mm256_loadu_ps(&C[(i + 0) * stride + j]);
+                        __m256 c1 = _mm256_loadu_ps(&C[(i + 1) * stride + j]);
+                        __m256 c2 = _mm256_loadu_ps(&C[(i + 2) * stride + j]);
+                        __m256 c3 = _mm256_loadu_ps(&C[(i + 3) * stride + j]);
                         
                         for (size_t k = block_k; k < end_k; k++) {
-                            __m256 b_vec = _mm256_load_ps(&B[k * stride + j]);
+                            __m256 b_vec = _mm256_loadu_ps(&B[k * stride + j]);
                             c0 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 0) * stride + k]), b_vec, c0);
                             c1 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 1) * stride + k]), b_vec, c1);
                             c2 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 2) * stride + k]), b_vec, c2);
                             c3 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 3) * stride + k]), b_vec, c3);
                         }
                         
-                        _mm256_store_ps(&C[(i + 0) * stride + j], c0);
-                        _mm256_store_ps(&C[(i + 1) * stride + j], c1);
-                        _mm256_store_ps(&C[(i + 2) * stride + j], c2);
-                        _mm256_store_ps(&C[(i + 3) * stride + j], c3);
+                        _mm256_storeu_ps(&C[(i + 0) * stride + j], c0);
+                        _mm256_storeu_ps(&C[(i + 1) * stride + j], c1);
+                        _mm256_storeu_ps(&C[(i + 2) * stride + j], c2);
+                        _mm256_storeu_ps(&C[(i + 3) * stride + j], c3);
                     }
                 }
 
                 // i clean-up loop for the remaining 1-3 rows if end_i isn't perfectly divisible by 4
                 for (; i < end_i; i++) {
                     for (size_t j = block_j; j < end_j; j += 8) {
-                        __m256 c_vec = _mm256_load_ps(&C[i * stride + j]);
+                        __m256 c_vec = _mm256_loadu_ps(&C[i * stride + j]);
                         for (size_t k = block_k; k < end_k; k++) {
                             __m256 a_broadcast = _mm256_set1_ps(A[i * stride + k]);
-                            __m256 b_vec       = _mm256_load_ps(&B[k * stride + j]);
+                            __m256 b_vec       = _mm256_loadu_ps(&B[k * stride + j]);
                             c_vec = _mm256_fmadd_ps(a_broadcast, b_vec, c_vec);
                         }
-                        _mm256_store_ps(&C[i * stride + j], c_vec);
+                        _mm256_storeu_ps(&C[i * stride + j], c_vec);
                     }
                 }
             }

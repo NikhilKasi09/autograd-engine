@@ -7,6 +7,13 @@
 // Macro to clamp loop boundaries so we don't compute the zero-padding blocks
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
+// Every load and store below is the unaligned form. posix_memalign only aligns
+// the base pointer, whereas each access addresses row i at data + i * stride,
+// which is 32-byte aligned only when stride % 8 == 0. That holds today because
+// matrix_create rounds every dimension up to a multiple of BLOCK_SIZE, but step
+// B drops the padding. A worker also starts at whatever row its slice begins
+// on, so even a padded stride would not make the alignment obvious by
+// inspection. vmovups on an aligned address costs the same as vmovaps on AVX2.
 static void gemm_worker_kernel(size_t start_row, size_t end_row,
                                size_t logical_size, size_t stride,
                                const float * restrict A,
@@ -30,18 +37,18 @@ static void gemm_worker_kernel(size_t start_row, size_t end_row,
                     
                     for (; j <= end_j - 16; j += 16) {
                         
-                        __m256 c00 = _mm256_load_ps(&C[(i + 0) * stride + j + 0]);
-                        __m256 c01 = _mm256_load_ps(&C[(i + 0) * stride + j + 8]);
-                        __m256 c10 = _mm256_load_ps(&C[(i + 1) * stride + j + 0]);
-                        __m256 c11 = _mm256_load_ps(&C[(i + 1) * stride + j + 8]);
-                        __m256 c20 = _mm256_load_ps(&C[(i + 2) * stride + j + 0]);
-                        __m256 c21 = _mm256_load_ps(&C[(i + 2) * stride + j + 8]);
-                        __m256 c30 = _mm256_load_ps(&C[(i + 3) * stride + j + 0]);
-                        __m256 c31 = _mm256_load_ps(&C[(i + 3) * stride + j + 8]);
+                        __m256 c00 = _mm256_loadu_ps(&C[(i + 0) * stride + j + 0]);
+                        __m256 c01 = _mm256_loadu_ps(&C[(i + 0) * stride + j + 8]);
+                        __m256 c10 = _mm256_loadu_ps(&C[(i + 1) * stride + j + 0]);
+                        __m256 c11 = _mm256_loadu_ps(&C[(i + 1) * stride + j + 8]);
+                        __m256 c20 = _mm256_loadu_ps(&C[(i + 2) * stride + j + 0]);
+                        __m256 c21 = _mm256_loadu_ps(&C[(i + 2) * stride + j + 8]);
+                        __m256 c30 = _mm256_loadu_ps(&C[(i + 3) * stride + j + 0]);
+                        __m256 c31 = _mm256_loadu_ps(&C[(i + 3) * stride + j + 8]);
                         
                         for (size_t k = block_k; k < end_k; k++) {
-                            __m256 b0 = _mm256_load_ps(&B[k * stride + j + 0]);
-                            __m256 b1 = _mm256_load_ps(&B[k * stride + j + 8]);
+                            __m256 b0 = _mm256_loadu_ps(&B[k * stride + j + 0]);
+                            __m256 b1 = _mm256_loadu_ps(&B[k * stride + j + 8]);
                             
                             __m256 a0 = _mm256_set1_ps(A[(i + 0) * stride + k]);
                             c00 = _mm256_fmadd_ps(a0, b0, c00);
@@ -60,48 +67,48 @@ static void gemm_worker_kernel(size_t start_row, size_t end_row,
                             c31 = _mm256_fmadd_ps(a3, b1, c31);
                         }
                         
-                        _mm256_store_ps(&C[(i + 0) * stride + j + 0], c00);
-                        _mm256_store_ps(&C[(i + 0) * stride + j + 8], c01);
-                        _mm256_store_ps(&C[(i + 1) * stride + j + 0], c10);
-                        _mm256_store_ps(&C[(i + 1) * stride + j + 8], c11);
-                        _mm256_store_ps(&C[(i + 2) * stride + j + 0], c20);
-                        _mm256_store_ps(&C[(i + 2) * stride + j + 8], c21);
-                        _mm256_store_ps(&C[(i + 3) * stride + j + 0], c30);
-                        _mm256_store_ps(&C[(i + 3) * stride + j + 8], c31);
+                        _mm256_storeu_ps(&C[(i + 0) * stride + j + 0], c00);
+                        _mm256_storeu_ps(&C[(i + 0) * stride + j + 8], c01);
+                        _mm256_storeu_ps(&C[(i + 1) * stride + j + 0], c10);
+                        _mm256_storeu_ps(&C[(i + 1) * stride + j + 8], c11);
+                        _mm256_storeu_ps(&C[(i + 2) * stride + j + 0], c20);
+                        _mm256_storeu_ps(&C[(i + 2) * stride + j + 8], c21);
+                        _mm256_storeu_ps(&C[(i + 3) * stride + j + 0], c30);
+                        _mm256_storeu_ps(&C[(i + 3) * stride + j + 8], c31);
                     }
                     
                     // j clean-up loop
                     for (; j < end_j; j += 8) {
-                        __m256 c0 = _mm256_load_ps(&C[(i + 0) * stride + j]);
-                        __m256 c1 = _mm256_load_ps(&C[(i + 1) * stride + j]);
-                        __m256 c2 = _mm256_load_ps(&C[(i + 2) * stride + j]);
-                        __m256 c3 = _mm256_load_ps(&C[(i + 3) * stride + j]);
+                        __m256 c0 = _mm256_loadu_ps(&C[(i + 0) * stride + j]);
+                        __m256 c1 = _mm256_loadu_ps(&C[(i + 1) * stride + j]);
+                        __m256 c2 = _mm256_loadu_ps(&C[(i + 2) * stride + j]);
+                        __m256 c3 = _mm256_loadu_ps(&C[(i + 3) * stride + j]);
                         
                         for (size_t k = block_k; k < end_k; k++) {
-                            __m256 b_vec = _mm256_load_ps(&B[k * stride + j]);
+                            __m256 b_vec = _mm256_loadu_ps(&B[k * stride + j]);
                             c0 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 0) * stride + k]), b_vec, c0);
                             c1 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 1) * stride + k]), b_vec, c1);
                             c2 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 2) * stride + k]), b_vec, c2);
                             c3 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 3) * stride + k]), b_vec, c3);
                         }
                         
-                        _mm256_store_ps(&C[(i + 0) * stride + j], c0);
-                        _mm256_store_ps(&C[(i + 1) * stride + j], c1);
-                        _mm256_store_ps(&C[(i + 2) * stride + j], c2);
-                        _mm256_store_ps(&C[(i + 3) * stride + j], c3);
+                        _mm256_storeu_ps(&C[(i + 0) * stride + j], c0);
+                        _mm256_storeu_ps(&C[(i + 1) * stride + j], c1);
+                        _mm256_storeu_ps(&C[(i + 2) * stride + j], c2);
+                        _mm256_storeu_ps(&C[(i + 3) * stride + j], c3);
                     }
                 }
 
                 // i clean-up loop
                 for (; i < end_i; i++) {
                     for (size_t j = block_j; j < end_j; j += 8) {
-                        __m256 c_vec = _mm256_load_ps(&C[i * stride + j]);
+                        __m256 c_vec = _mm256_loadu_ps(&C[i * stride + j]);
                         for (size_t k = block_k; k < end_k; k++) {
                             __m256 a_broadcast = _mm256_set1_ps(A[i * stride + k]);
-                            __m256 b_vec       = _mm256_load_ps(&B[k * stride + j]);
+                            __m256 b_vec       = _mm256_loadu_ps(&B[k * stride + j]);
                             c_vec = _mm256_fmadd_ps(a_broadcast, b_vec, c_vec);
                         }
-                        _mm256_store_ps(&C[i * stride + j], c_vec);
+                        _mm256_storeu_ps(&C[i * stride + j], c_vec);
                     }
                 }
             }
