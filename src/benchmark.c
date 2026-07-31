@@ -11,7 +11,7 @@ benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const matrix_t *A, cons
     double times[TIMED_RUNS];
 
     // Scrub C clean before the warmup run
-    memset(C->data, 0, C->padded_size * C->padded_size * sizeof(float));
+    matrix_zero(C);
 
     // Warmup run for cold cache
     kernel(A, B, C);
@@ -24,7 +24,7 @@ benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const matrix_t *A, cons
     for (int i = 0; i < TIMED_RUNS; i++) {
 
         // Scrub C clean BEFORE starting the hardware clock
-        memset(C->data, 0, C->padded_size * C->padded_size * sizeof(float));
+        matrix_zero(C);
         
         // Start clock
         clock_gettime(CLOCK_MONOTONIC, &start);
@@ -58,9 +58,9 @@ benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const matrix_t *A, cons
     double median_seconds = times[2];
     result.elapsed_seconds = median_seconds;
 
-    // Calculate GigaFLOP/s
-    double n_double = (double)A->size;
-    double total_flops = 2.0 * n_double * n_double * n_double;
+    // Calculate GigaFLOP/s. Every factor is cast to double before being
+    // multiplied, otherwise M * N * K overflows in size_t first.
+    double total_flops = 2.0 * (double)C->rows * (double)C->cols * (double)A->cols;
 
     // Prevent division by zero if the clock was too fast
     if (median_seconds > 0.0) {

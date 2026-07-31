@@ -1,4 +1,5 @@
 #include "gemm.h"
+#include "gemm_internal.h"
 #include <immintrin.h>
 #include <stdio.h>
 
@@ -39,10 +40,18 @@ static void gemm_avx2_kernel(size_t logical_size,
 
 // Public wrapper
 void gemm_avx2(const matrix_t *A, const matrix_t *B, matrix_t *C) {
-    if (A->size != B->size || A->size != C->size) {
-        fprintf(stderr, "gemm_avx2: matrix size mismatch (%zu, %zu, %zu)\n",
-                A->size, B->size, C->size);
+    if (!gemm_shapes_square_ok("gemm_avx2", A, B, C)) {
         return;
     }
-    gemm_avx2_kernel(A->size, A->padded_size, A->data, B->data, C->data);
+
+    // The j loop steps 8 at a time with no scalar tail, so anything that is
+    // not a whole number of vectors wide would walk off the end of the row.
+    // The padding used to hide this. Lifted at step F.
+    if (A->cols % GEMM_VEC != 0) {
+        fprintf(stderr, "gemm_avx2: N must be a multiple of %d for now, got %zu\n", GEMM_VEC,
+                A->cols);
+        return;
+    }
+
+    gemm_avx2_kernel(A->rows, A->stride, A->data, B->data, C->data);
 }

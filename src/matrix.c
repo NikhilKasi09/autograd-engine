@@ -1,11 +1,24 @@
+// posix_memalign is POSIX rather than ISO C, and -pedantic only lets it
+// through today because gcc defaults to gnu17. Ask for it explicitly.
+#define _POSIX_C_SOURCE 200112L
+
 #include "matrix.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <stdint.h> /* SIZE_MAX */
 
-matrix_t *matrix_create(size_t size) {
-    if (size <= 0) {
-        fprintf(stderr, "Error: Matrix size must be greater than 0.\n");
+matrix_t *matrix_create(size_t rows, size_t cols) {
+    // Both dimensions are size_t, so the old 'size <= 0' could never fire
+    if (rows == 0 || cols == 0) {
+        fprintf(stderr, "Error: Matrix dimensions must be greater than 0.\n");
+        return NULL;
+    }
+
+    // rows * cols has to fit in a size_t before it can be multiplied by
+    // sizeof(float), otherwise the allocation silently comes back too small
+    if (rows > SIZE_MAX / cols) {
+        fprintf(stderr, "Error: Matrix dimensions %zu x %zu overflow size_t.\n", rows, cols);
         return NULL;
     }
 
@@ -16,19 +29,30 @@ matrix_t *matrix_create(size_t size) {
         fprintf(stderr, "Error: malloc failed to allocate matrix struct.\n");
         return NULL;
     }
-    
-    mat->size = size;
 
-    // size rounded to nearest multiple of BLOCK_SIZE (64)
-    mat->padded_size = ((size + BLOCK_SIZE - 1) / BLOCK_SIZE) * BLOCK_SIZE;
+    mat->rows = rows;
+    mat->cols = cols;
 
-    // Calculate required size in bytes using padded size
-    size_t num_bytes = mat->padded_size * mat->padded_size * sizeof(float);
+    // No padding: rows are packed back to back. The kernels handle ragged
+    // edges themselves, with a scalar loop for whatever the vector loop
+    // cannot cover.
+    mat->stride = cols;
 
-    // Allocate the 32-byte aligned memory for the matrix data
+    size_t num_elements = rows * cols;
+    size_t num_bytes    = num_elements * sizeof(float);
+
+    /*
+     Allocate the 32-byte aligned memory for the matrix data.
+
+     This aligns the base pointer only. Row i starts at data + i * stride,
+     which is 32-byte aligned only when stride % 8 == 0, so the kernels cannot
+     assume anything and use unaligned loads. Keeping the aligned allocation
+     costs nothing and leaves the door open for a padded-stride experiment
+     later.
+    */
     void *aligned_ptr = NULL;
     int align_status = posix_memalign(&aligned_ptr, ALIGNMENT_REQ, num_bytes);
-    
+
     if (align_status != 0) {
         fprintf(stderr, "Error: posix_memalign failed to allocate 32-byte aligned memory.\n");
         // Prevent memory leak by freeing the allocated struct
@@ -54,7 +78,7 @@ void matrix_free(matrix_t *mat) {
     if (mat->data != NULL) {
         free(mat->data);
     }
-    
+
     // Free struct itself
     free(mat);
 }
@@ -64,10 +88,40 @@ void matrix_randomize(matrix_t *mat) {
         return;
     }
 
-    // Use 2D loop up to mat->size to avoid randomizing the padding buffer
-    for (size_t i = 0; i < mat->size; i++) {
-        for (size_t j = 0; j < mat->size; j++) {
-            mat->data[i * mat->padded_size + j] = (float)rand() / (float)RAND_MAX;
+    for (size_t i = 0; i < mat->rows; i++) {
+        for (size_t j = 0; j < mat->cols; j++) {
+            mat->data[i * mat->stride + j] = (float)rand() / (float)RAND_MAX;
         }
+    }
+}
+
+void matrix_zero(matrix_t *mat) {
+    if (mat == NULL || mat->data == NULL) {
+        return;
+    }
+
+    // One memset per row rather than one for rows * stride. They are the same
+    // thing while stride == cols, but the row loop stays correct the day this
+    // matrix is a view onto a larger one.
+    for (size_t i = 0; i < mat->rows; i++) {
+        memset(&mat->data[i * mat->stride], 0, mat->cols * sizeof(float));
+    }
+}
+
+void matrix_copy(matrix_t *dst, const matrix_t *src) {
+    if (dst == NULL || src == NULL || dst->data == NULL || src->data == NULL) {
+        return;
+    }
+
+    if (dst->rows != src->rows || dst->cols != src->cols) {
+        fprintf(stderr, "Error: matrix_copy shape mismatch (%zux%zu into %zux%zu).\n",
+                src->rows, src->cols, dst->rows, dst->cols);
+        return;
+    }
+
+    // Copied row by row, since the two matrices can have different strides
+    for (size_t i = 0; i < dst->rows; i++) {
+        memcpy(&dst->data[i * dst->stride], &src->data[i * src->stride],
+               dst->cols * sizeof(float));
     }
 }

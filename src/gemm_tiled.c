@@ -1,10 +1,13 @@
 #include "gemm.h"
+#include "gemm_internal.h"
 #include <stdio.h>
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-// Note: 'N' represents the physical padded size, not the logical matrix size
-static void gemm_tiled_kernel(size_t logical_size, size_t stride, 
+// logical_size is the matrix dimension and stride is the distance between
+// rows. They were the same thing back when every allocation was padded, which
+// is why the old comment here claimed this parameter was the padded size.
+static void gemm_tiled_kernel(size_t logical_size, size_t stride,
                               const float * restrict A, const float * restrict B, 
                               float * restrict C) {
 
@@ -36,9 +39,8 @@ static void gemm_tiled_kernel(size_t logical_size, size_t stride,
 
 
 void gemm_tiled(const matrix_t *A, const matrix_t *B, matrix_t *C) {
-    if (A->size != B->size || A->size != C->size) {
-        fprintf(stderr, "gemm_tiled: matrix size mismatch (%zu, %zu, %zu)\n", A->size, B->size, C->size);
-        return; 
+    if (!gemm_shapes_square_ok("gemm_tiled", A, B, C)) {
+        return;
     }
-    gemm_tiled_kernel(A->size, A->padded_size, A->data, B->data, C->data);
+    gemm_tiled_kernel(A->rows, A->stride, A->data, B->data, C->data);
 }

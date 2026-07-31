@@ -98,29 +98,27 @@ static const char *restriction_violated(unsigned mask, size_t M, size_t N, size_
 /* ------------------------------------------------------------------------ */
 
 /*
- The harness runs against the square-only matrix_t (size / padded_size) for
- now. Every access below goes through these three helpers, so the struct
- change in step B is a small edit here instead of a rewrite of the file.
+ Every access to a matrix_t goes through these three helpers, so that a change
+ to the struct is a small edit here instead of a rewrite of the file. They
+ earned their keep at step B, when size and padded_size became rows, cols and
+ stride.
 
- mat_new returns NULL for a non-square request today. That is a limitation of
- the allocator rather than an error in the harness, so it is reported as
- SKIP [alloc-nonsquare] and the full shape table can be switched on before
- matrix_create catches up.
+ mat_new can build any shape now that the allocator takes two dimensions, so
+ the alloc-nonsquare path in run_shape no longer fires. It stays until the
+ shape table actually goes non-square at step C.
 */
 static matrix_t *mat_new(size_t rows, size_t cols) {
-    if (rows != cols) {
-        return NULL;
-    }
-    return matrix_create(rows);
+    return matrix_create(rows, cols);
 }
 
 static size_t mat_stride(const matrix_t *m) {
-    return m->padded_size;
+    return m->stride;
 }
 
-// Floats in the whole allocation, padding included. Used to scrub C.
+// Floats in the whole allocation. There is no padding any more, so this is
+// just rows * stride, but scrubbing still goes through one name.
 static size_t mat_alloc_floats(const matrix_t *m) {
-    return m->padded_size * m->padded_size;
+    return m->rows * m->stride;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -274,20 +272,30 @@ typedef struct {
     int              nthreads; /* 0 for the single-threaded kernels */
 } kernel_entry_t;
 
-// Masks follow the capability table in PLAN.md, step A column. They burn down
-// to zero over steps C to H, so this array doubles as the progress tracker.
+/*
+ Masks follow the capability table in PLAN.md, currently the step B column.
+ They burn down to zero over steps C to H, so this array doubles as the
+ progress tracker.
+
+ N_MULT8 arrives for the three SIMD kernels at step B. Those kernels step the
+ j loop in whole vectors with no scalar tail, and 63, 65 and 127 only ever
+ worked because the allocator quietly rounded the stride up to 64 or 128. With
+ stride == cols the vector loop would run off the end of the row, so the
+ wrappers reject those shapes until steps F and G put the tails in.
+*/
 static const kernel_entry_t kernels[] = {
     {"naive",      gemm_naive,      RESTRICT_SQUARE,                                        0},
     {"ikj",        gemm_ikj,        RESTRICT_SQUARE,                                        0},
     {"tiled",      gemm_tiled,      RESTRICT_SQUARE,                                        0},
-    {"avx2",       gemm_avx2,       RESTRICT_SQUARE,                                        0},
-    {"tiled_simd", gemm_tiled_simd, RESTRICT_SQUARE | RESTRICT_N_MIN16 | RESTRICT_M_MIN4,   0},
-    {"mt1",        mt1,             RESTRICT_SQUARE | RESTRICT_N_MIN16 | RESTRICT_M_MIN4 |
-                                    RESTRICT_MT_4ROWS,                                      1},
-    {"mt2",        mt2,             RESTRICT_SQUARE | RESTRICT_N_MIN16 | RESTRICT_M_MIN4 |
-                                    RESTRICT_MT_4ROWS,                                      2},
-    {"mt8",        mt8,             RESTRICT_SQUARE | RESTRICT_N_MIN16 | RESTRICT_M_MIN4 |
-                                    RESTRICT_MT_4ROWS,                                      8}
+    {"avx2",       gemm_avx2,       RESTRICT_SQUARE | RESTRICT_N_MULT8,                     0},
+    {"tiled_simd", gemm_tiled_simd, RESTRICT_SQUARE | RESTRICT_N_MULT8 | RESTRICT_N_MIN16 |
+                                    RESTRICT_M_MIN4,                                        0},
+    {"mt1",        mt1,             RESTRICT_SQUARE | RESTRICT_N_MULT8 | RESTRICT_N_MIN16 |
+                                    RESTRICT_M_MIN4 | RESTRICT_MT_4ROWS,                    1},
+    {"mt2",        mt2,             RESTRICT_SQUARE | RESTRICT_N_MULT8 | RESTRICT_N_MIN16 |
+                                    RESTRICT_M_MIN4 | RESTRICT_MT_4ROWS,                    2},
+    {"mt8",        mt8,             RESTRICT_SQUARE | RESTRICT_N_MULT8 | RESTRICT_N_MIN16 |
+                                    RESTRICT_M_MIN4 | RESTRICT_MT_4ROWS,                    8}
 };
 static const size_t num_kernels = sizeof(kernels) / sizeof(kernels[0]);
 

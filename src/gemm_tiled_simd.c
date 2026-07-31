@@ -1,4 +1,5 @@
 #include "gemm.h"
+#include "gemm_internal.h"
 #include <immintrin.h>
 #include <stdio.h>
 
@@ -116,10 +117,18 @@ static void gemm_tiled_simd_kernel(size_t logical_size, size_t stride,
 }
 
 void gemm_tiled_simd(const matrix_t *A, const matrix_t *B, matrix_t *C) {
-    if (A->size != B->size || A->size != C->size) {
-        fprintf(stderr, "gemm_tiled_simd: matrix size mismatch (%zu, %zu, %zu)\n",
-                A->size, B->size, C->size);
+    if (!gemm_shapes_square_ok("gemm_tiled_simd", A, B, C)) {
         return;
     }
-    gemm_tiled_simd_kernel(A->size, A->padded_size, A->data, B->data, C->data);
+
+    // Both j loops step in whole vectors with no scalar tail, so a row that is
+    // not a multiple of 8 wide would be overrun. The padding used to absorb
+    // that. Lifted at step G.
+    if (A->cols % GEMM_VEC != 0) {
+        fprintf(stderr, "gemm_tiled_simd: N must be a multiple of %d for now, got %zu\n",
+                GEMM_VEC, A->cols);
+        return;
+    }
+
+    gemm_tiled_simd_kernel(A->rows, A->stride, A->data, B->data, C->data);
 }

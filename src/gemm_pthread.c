@@ -1,4 +1,5 @@
 #include "gemm.h"
+#include "gemm_internal.h"
 #include <immintrin.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -129,9 +130,15 @@ static void *gemm_worker(void *raw_args) {
 
 // Public Wrapper
 void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int num_threads) {
-    if (A->size != B->size || A->size != C->size) {
-        fprintf(stderr, "gemm_multithreaded: matrix size mismatch (%zu, %zu, %zu)\n",
-                A->size, B->size, C->size);
+    if (!gemm_shapes_square_ok("gemm_multithreaded", A, B, C)) {
+        return;
+    }
+
+    // Same whole-vector requirement as the kernel it shares its body with.
+    // Lifted at step H.
+    if (A->cols % GEMM_VEC != 0) {
+        fprintf(stderr, "gemm_multithreaded: N must be a multiple of %d for now, got %zu\n",
+                GEMM_VEC, A->cols);
         return;
     }
 
@@ -140,8 +147,8 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
         return;
     }
 
-    const size_t logical_size = A->size;
-    const size_t stride       = A->padded_size;
+    const size_t logical_size = A->rows;
+    const size_t stride       = A->stride;
 
     // Never spin up more threads than there are rows to hand out.
     size_t nthreads = (size_t)num_threads;

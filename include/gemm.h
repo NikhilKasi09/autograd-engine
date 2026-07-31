@@ -3,7 +3,11 @@
 
 #include "matrix.h"
 
-#define BLOCK_SIZE 64
+/*
+ None of these kernels may be called with C aliasing A or B. The inner loops
+ are written with restrict pointers, so gemm(A, B, A) is undefined behaviour
+ rather than a slow path.
+*/
 
 /*
  Packages the matrix pointers, dimensions, and row boundaries required 
@@ -37,8 +41,11 @@ void gemm_naive(const matrix_t *A, const matrix_t *B, matrix_t *C);
  * @brief Computes matrix multiplication (C = A * B) using AVX2 SIMD intrinsics.
  *
  * Processes 8 single-precision floats per clock cycle using 256-bit ymm registers.
- * Requires all matrix data pointers to be 32-byte aligned (guaranteed by matrix_create).
- * Matrix dimensions must be a multiple of 8 (guaranteed by matrix_create padding).
+ * Uses unaligned loads, since only the base pointer of a matrix is 32-byte
+ * aligned and row i sits at data + i * stride.
+ *
+ * The j loop has no scalar tail yet, so N must currently be a multiple of 8.
+ * The wrapper rejects anything else. Lifted at step F.
  *
  * @param A Pointer to the first input matrix struct (read-only).
  * @param B Pointer to the second input matrix struct (read-only).
@@ -49,10 +56,10 @@ void gemm_avx2(const matrix_t *A, const matrix_t *B, matrix_t *C);
 /**
  * @brief Computes matrix multiplication using a 64x64 Cache-Tiled Architecture.
  *
- * This function divides the matrices into 16KB sub-blocks to ensure 
- * the working set remains completely resident within the L1 hardware cache 
- * during computation. It heavily relies on the zero-padded memory allocations 
- * in the matrix_t struct to bypass edge-case boundary checks.
+ * This function divides the matrices into 16KB sub-blocks to ensure
+ * the working set remains completely resident within the L1 hardware cache
+ * during computation. The tile loops clamp against the matrix dimensions, so
+ * a trailing tile is simply smaller than the rest.
  *
  * @param A Pointer to the first input matrix struct (read-only).
  * @param B Pointer to the second input matrix struct (read-only).
@@ -65,10 +72,13 @@ void gemm_tiled(const matrix_t *A, const matrix_t *B, matrix_t *C);
  *
  * This function achieves peak CPU throughput by locking sub-blocks into the L1 
  * hardware cache while vectorizing the innermost computations. It utilizes an 
- * i-j-k loop reordering to accumulate fused multiply-adds (FMA) entirely within 
- * hardware registers, eliminating store-forwarding stalls. Furthermore, it strictly 
- * relies on the 32-byte aligned, zero-padded memory in the matrix_t struct to safely 
- * execute 256-bit loads and stores without edge-case boundary checks or segmentation faults.
+ * i-j-k loop reordering to accumulate fused multiply-adds (FMA) entirely within
+ * hardware registers, eliminating store-forwarding stalls.
+ *
+ * The 256-bit loads and stores are the unaligned forms, since only the base
+ * pointer of a matrix is 32-byte aligned. Neither j loop has a scalar tail
+ * yet, so N must currently be a multiple of 8 and the wrapper rejects anything
+ * else. Lifted at step G.
  *
  * @param A Pointer to the first input matrix struct (read-only).
  * @param B Pointer to the second input matrix struct (read-only).

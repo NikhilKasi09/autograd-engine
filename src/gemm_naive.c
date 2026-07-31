@@ -1,4 +1,5 @@
 #include "gemm.h"
+#include "gemm_internal.h"
 
 // Private internal kernel
 static void gemm_naive_kernel(size_t N, 
@@ -17,11 +18,11 @@ static void gemm_naive_kernel(size_t N,
 
 // Public wrapper
 void gemm_naive(const matrix_t *A, const matrix_t *B, matrix_t *C) {
-    // Safety check: ensure matrices are the same size before doing math
-    if (A->size != B->size || A->size != C->size) {
-        return; 
+    // Safety check: ensure the shapes work before doing math
+    if (!gemm_shapes_square_ok("gemm_naive", A, B, C)) {
+        return;
     }
 
     // Extract the size and raw data pointers
-    gemm_naive_kernel(A->size, A->padded_size, A->data, B->data, C->data);
+    gemm_naive_kernel(A->rows, A->stride, A->data, B->data, C->data);
 }

@@ -33,10 +33,10 @@ int main() {
     for (int s = 0; s < num_sizes; s++) {
         size_t N = sizes[s];
         
-        matrix_t *A = matrix_create(N);
-        matrix_t *B = matrix_create(N);
-        matrix_t *C = matrix_create(N);
-        matrix_t *expected_C = matrix_create(N);
+        matrix_t *A = matrix_create(N, N);
+        matrix_t *B = matrix_create(N, N);
+        matrix_t *C = matrix_create(N, N);
+        matrix_t *expected_C = matrix_create(N, N);
 
         if (!A || !B || !C || !expected_C) {
             fprintf(stderr, "Fatal: Memory allocation failed for size %zu\n", N);
@@ -60,12 +60,17 @@ int main() {
 
             if (k == 0) {
                 // If this is the Naive run, save its output as the ultimate source of truth
-                memcpy(expected_C->data, C->data, C->padded_size * C->padded_size * sizeof(float));
+                matrix_copy(expected_C, C);
                 naive_time = res.elapsed_seconds;
             } else {
-                // For all other kernels, prove they match the Naive output
-                // (This will automatically exit(1) and crash if there is floating point drift)
-                matrices_match(expected_C, C);
+                // For all other kernels, prove they match the Naive output.
+                // matrices_match now reports and returns 0 rather than calling
+                // exit(1) itself, so the bail-out lives here.
+                if (!matrices_match(expected_C, C)) {
+                    fprintf(stderr, "Validation failed for %s at size %zu\n",
+                            kernels[k].name, N);
+                    return 1;
+                }
             }
 
             if (k == num_kernels - 1) {
