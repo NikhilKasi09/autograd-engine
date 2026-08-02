@@ -290,8 +290,7 @@ static const kernel_entry_t kernels[] = {
     {"ikj",        gemm_ikj,        0,                                                      0},
     {"tiled",      gemm_tiled,      0,                                                      0},
     {"avx2",       gemm_avx2,       0,                                                      0},
-    {"tiled_simd", gemm_tiled_simd, RESTRICT_SQUARE | RESTRICT_N_MULT8 | RESTRICT_N_MIN16 |
-                                    RESTRICT_M_MIN4,                                        0},
+    {"tiled_simd", gemm_tiled_simd, 0,                                                      0},
     {"mt1",        mt1,             RESTRICT_SQUARE | RESTRICT_N_MULT8 | RESTRICT_N_MIN16 |
                                     RESTRICT_M_MIN4 | RESTRICT_MT_4ROWS,                    1},
     {"mt2",        mt2,             RESTRICT_SQUARE | RESTRICT_N_MULT8 | RESTRICT_N_MIN16 |
