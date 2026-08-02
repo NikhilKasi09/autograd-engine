@@ -17,21 +17,6 @@
  reports on stderr and returns without touching C if given anything else.
 */
 
-/*
- Packages the matrix pointers, dimensions, and row boundaries required 
- for a single worker thread to compute its assigned horizontal slice
-*/
-typedef struct {
-    size_t start_row;
-    size_t end_row;
-    size_t logical_size;
-    size_t stride;
-    
-    const float *A;
-    const float *B;
-    float *C;
-} thread_args_t;
-
 /**
  * @brief Computes the baseline naive matrix multiplication (C = A * B).
  *
@@ -104,11 +89,16 @@ void gemm_tiled_simd(const matrix_t *A, const matrix_t *B, matrix_t *C);
  * @brief Computes matrix multiplication (C = A * B) by horizontally partitioning
  *        the output matrix across a pool of POSIX threads.
  *
- * Splits C into num_threads horizontal row-slices (see thread_args_t), so that
- * each worker thread owns a disjoint, contiguous range of rows and never writes
- * to a cache line touched by another thread (avoiding false sharing). Each
- * worker computes its slice using the same 64x64 cache-tiled, AVX2-vectorized
- * kernel as gemm_tiled_simd, restricted to its assigned row boundaries.
+ * Splits C into num_threads horizontal row-slices, so each worker owns a
+ * disjoint, contiguous range of rows and never writes a cache line another
+ * thread is writing. Each worker calls gemm_tiled_simd_kernel on pointers
+ * already offset to its own rows, so it is the same code path as
+ * gemm_tiled_simd rather than a copy of it.
+ *
+ * Slices are whole multiples of 4 rows wherever there are enough to go round,
+ * so only the last worker deals with any leftover rows.
+ *
+ * Accepts any M, N and K.
  *
  * @param A Pointer to the first input matrix struct (read-only).
  * @param B Pointer to the second input matrix struct (read-only).

@@ -190,10 +190,11 @@ static void gemm_tiled_simd_core(size_t M, size_t N, size_t K,
  _mm256_maskload_ps would remove the strips entirely by letting the vector path
  handle a partial column block directly, and is the obvious next optimisation.
 */
-static void gemm_tiled_simd_kernel(size_t M, size_t N, size_t K,
-                                   const float * restrict A, size_t lda,
-                                   const float * restrict B, size_t ldb,
-                                   float * restrict C, size_t ldc) {
+// Not static: gemm_pthread.c runs this on each worker's slice of C
+void gemm_tiled_simd_kernel(size_t M, size_t N, size_t K,
+                            const float * restrict A, size_t lda,
+                            const float * restrict B, size_t ldb,
+                            float * restrict C, size_t ldc) {
 
     // Largest multiples of the register block and the vector width that fit.
     // Subtracting the remainder means neither can underflow.

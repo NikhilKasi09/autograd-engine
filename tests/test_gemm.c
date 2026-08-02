@@ -261,8 +261,16 @@ static void mt1(const matrix_t *A, const matrix_t *B, matrix_t *C) {
 static void mt2(const matrix_t *A, const matrix_t *B, matrix_t *C) {
     gemm_multithreaded(A, B, C, 2);
 }
+static void mt3(const matrix_t *A, const matrix_t *B, matrix_t *C) {
+    gemm_multithreaded(A, B, C, 3);
+}
 static void mt8(const matrix_t *A, const matrix_t *B, matrix_t *C) {
     gemm_multithreaded(A, B, C, 8);
+}
+// 64 threads is well past the row count of most shapes in the table, so this
+// is the one that exercises the clamp
+static void mt64(const matrix_t *A, const matrix_t *B, matrix_t *C) {
+    gemm_multithreaded(A, B, C, 64);
 }
 
 typedef struct {
@@ -291,12 +299,11 @@ static const kernel_entry_t kernels[] = {
     {"tiled",      gemm_tiled,      0,                                                      0},
     {"avx2",       gemm_avx2,       0,                                                      0},
     {"tiled_simd", gemm_tiled_simd, 0,                                                      0},
-    {"mt1",        mt1,             RESTRICT_SQUARE | RESTRICT_N_MULT8 | RESTRICT_N_MIN16 |
-                                    RESTRICT_M_MIN4 | RESTRICT_MT_4ROWS,                    1},
-    {"mt2",        mt2,             RESTRICT_SQUARE | RESTRICT_N_MULT8 | RESTRICT_N_MIN16 |
-                                    RESTRICT_M_MIN4 | RESTRICT_MT_4ROWS,                    2},
-    {"mt8",        mt8,             RESTRICT_SQUARE | RESTRICT_N_MULT8 | RESTRICT_N_MIN16 |
-                                    RESTRICT_M_MIN4 | RESTRICT_MT_4ROWS,                    8}
+    {"mt1",        mt1,             0,                                                      1},
+    {"mt2",        mt2,             0,                                                      2},
+    {"mt3",        mt3,             0,                                                      3},
+    {"mt8",        mt8,             0,                                                      8},
+    {"mt64",       mt64,            0,                                                     64}
 };
 static const size_t num_kernels = sizeof(kernels) / sizeof(kernels[0]);
 

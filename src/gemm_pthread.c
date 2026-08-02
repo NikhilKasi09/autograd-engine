@@ -1,144 +1,25 @@
 #include "gemm.h"
 #include "gemm_internal.h"
-#include <immintrin.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-// Macro to clamp loop boundaries so we don't compute the zero-padding blocks
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-
-// Every load and store below is the unaligned form. posix_memalign only aligns
-// the base pointer, whereas each access addresses row i at data + i * stride,
-// which is 32-byte aligned only when stride % 8 == 0. That holds today because
-// matrix_create rounds every dimension up to a multiple of BLOCK_SIZE, but step
-// B drops the padding. A worker also starts at whatever row its slice begins
-// on, so even a padded stride would not make the alignment obvious by
-// inspection. vmovups on an aligned address costs the same as vmovaps on AVX2.
-static void gemm_worker_kernel(size_t start_row, size_t end_row,
-                               size_t logical_size, size_t stride,
-                               const float * restrict A,
-                               const float * restrict B,
-                               float * restrict C) {
-
-    for (size_t block_i = start_row; block_i < end_row; block_i += BLOCK_SIZE) {
-        for (size_t block_k = 0; block_k < logical_size; block_k += BLOCK_SIZE) {
-            for (size_t block_j = 0; block_j < logical_size; block_j += BLOCK_SIZE) {
-
-                // Clamp to this thread's row boundary
-                size_t end_i = MIN(block_i + BLOCK_SIZE, end_row);
-                size_t end_k = MIN(block_k + BLOCK_SIZE, logical_size);
-                size_t end_j = MIN(block_j + BLOCK_SIZE, logical_size);
-
-                size_t i = block_i;
-
-                // 2D Register Block: Unroll 'i' by 4, and 'j' by 16 (2 vectors)
-                for (; i <= end_i - 4; i += 4) {
-                    size_t j = block_j;
-                    
-                    for (; j <= end_j - 16; j += 16) {
-                        
-                        __m256 c00 = _mm256_loadu_ps(&C[(i + 0) * stride + j + 0]);
-                        __m256 c01 = _mm256_loadu_ps(&C[(i + 0) * stride + j + 8]);
-                        __m256 c10 = _mm256_loadu_ps(&C[(i + 1) * stride + j + 0]);
-                        __m256 c11 = _mm256_loadu_ps(&C[(i + 1) * stride + j + 8]);
-                        __m256 c20 = _mm256_loadu_ps(&C[(i + 2) * stride + j + 0]);
-                        __m256 c21 = _mm256_loadu_ps(&C[(i + 2) * stride + j + 8]);
-                        __m256 c30 = _mm256_loadu_ps(&C[(i + 3) * stride + j + 0]);
-                        __m256 c31 = _mm256_loadu_ps(&C[(i + 3) * stride + j + 8]);
-                        
-                        for (size_t k = block_k; k < end_k; k++) {
-                            __m256 b0 = _mm256_loadu_ps(&B[k * stride + j + 0]);
-                            __m256 b1 = _mm256_loadu_ps(&B[k * stride + j + 8]);
-                            
-                            __m256 a0 = _mm256_set1_ps(A[(i + 0) * stride + k]);
-                            c00 = _mm256_fmadd_ps(a0, b0, c00);
-                            c01 = _mm256_fmadd_ps(a0, b1, c01);
-                            
-                            __m256 a1 = _mm256_set1_ps(A[(i + 1) * stride + k]);
-                            c10 = _mm256_fmadd_ps(a1, b0, c10);
-                            c11 = _mm256_fmadd_ps(a1, b1, c11);
-                            
-                            __m256 a2 = _mm256_set1_ps(A[(i + 2) * stride + k]);
-                            c20 = _mm256_fmadd_ps(a2, b0, c20);
-                            c21 = _mm256_fmadd_ps(a2, b1, c21);
-                            
-                            __m256 a3 = _mm256_set1_ps(A[(i + 3) * stride + k]);
-                            c30 = _mm256_fmadd_ps(a3, b0, c30);
-                            c31 = _mm256_fmadd_ps(a3, b1, c31);
-                        }
-                        
-                        _mm256_storeu_ps(&C[(i + 0) * stride + j + 0], c00);
-                        _mm256_storeu_ps(&C[(i + 0) * stride + j + 8], c01);
-                        _mm256_storeu_ps(&C[(i + 1) * stride + j + 0], c10);
-                        _mm256_storeu_ps(&C[(i + 1) * stride + j + 8], c11);
-                        _mm256_storeu_ps(&C[(i + 2) * stride + j + 0], c20);
-                        _mm256_storeu_ps(&C[(i + 2) * stride + j + 8], c21);
-                        _mm256_storeu_ps(&C[(i + 3) * stride + j + 0], c30);
-                        _mm256_storeu_ps(&C[(i + 3) * stride + j + 8], c31);
-                    }
-                    
-                    // j clean-up loop
-                    for (; j < end_j; j += 8) {
-                        __m256 c0 = _mm256_loadu_ps(&C[(i + 0) * stride + j]);
-                        __m256 c1 = _mm256_loadu_ps(&C[(i + 1) * stride + j]);
-                        __m256 c2 = _mm256_loadu_ps(&C[(i + 2) * stride + j]);
-                        __m256 c3 = _mm256_loadu_ps(&C[(i + 3) * stride + j]);
-                        
-                        for (size_t k = block_k; k < end_k; k++) {
-                            __m256 b_vec = _mm256_loadu_ps(&B[k * stride + j]);
-                            c0 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 0) * stride + k]), b_vec, c0);
-                            c1 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 1) * stride + k]), b_vec, c1);
-                            c2 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 2) * stride + k]), b_vec, c2);
-                            c3 = _mm256_fmadd_ps(_mm256_set1_ps(A[(i + 3) * stride + k]), b_vec, c3);
-                        }
-                        
-                        _mm256_storeu_ps(&C[(i + 0) * stride + j], c0);
-                        _mm256_storeu_ps(&C[(i + 1) * stride + j], c1);
-                        _mm256_storeu_ps(&C[(i + 2) * stride + j], c2);
-                        _mm256_storeu_ps(&C[(i + 3) * stride + j], c3);
-                    }
-                }
-
-                // i clean-up loop
-                for (; i < end_i; i++) {
-                    for (size_t j = block_j; j < end_j; j += 8) {
-                        __m256 c_vec = _mm256_loadu_ps(&C[i * stride + j]);
-                        for (size_t k = block_k; k < end_k; k++) {
-                            __m256 a_broadcast = _mm256_set1_ps(A[i * stride + k]);
-                            __m256 b_vec       = _mm256_loadu_ps(&B[k * stride + j]);
-                            c_vec = _mm256_fmadd_ps(a_broadcast, b_vec, c_vec);
-                        }
-                        _mm256_storeu_ps(&C[i * stride + j], c_vec);
-                    }
-                }
-            }
-        }
-    }
-}
-
 // pthread entry point: unpacks a thread_args_t and runs that slice's kernel.
+// The pointers are already offset, so this is just a GEMM of m_rows by N.
 static void *gemm_worker(void *raw_args) {
     const thread_args_t *args = (const thread_args_t *)raw_args;
 
-    gemm_worker_kernel(args->start_row, args->end_row,
-                        args->logical_size, args->stride,
-                        args->A, args->B, args->C);
+    gemm_tiled_simd_kernel(args->m_rows, args->N, args->K,
+                           args->A, args->lda,
+                           args->B, args->ldb,
+                           args->C, args->ldc);
 
     return NULL;
 }
 
 // Public Wrapper
 void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int num_threads) {
-    if (!gemm_shapes_square_ok("gemm_multithreaded", A, B, C)) {
-        return;
-    }
-
-    // Same whole-vector requirement as the kernel it shares its body with.
-    // Lifted at step H.
-    if (A->cols % GEMM_VEC != 0) {
-        fprintf(stderr, "gemm_multithreaded: N must be a multiple of %d for now, got %zu\n",
-                GEMM_VEC, A->cols);
+    if (!gemm_check_shapes("gemm_multithreaded", A, B, C)) {
         return;
     }
 
@@ -147,20 +28,19 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
         return;
     }
 
-    const size_t logical_size = A->rows;
-    const size_t stride       = A->stride;
+    // Slicing is over the rows of C, so M is what gets divided up
+    const size_t M = C->rows;
+    const size_t N = C->cols;
+    const size_t K = A->cols;
 
-    // Never spin up more threads than there are rows to hand out.
+    // Never spin up more threads than there are rows to hand out
     size_t nthreads = (size_t)num_threads;
-    if (nthreads > logical_size) {
-        nthreads = logical_size;
-    }
-    if (nthreads == 0) {
-        return;
+    if (nthreads > M) {
+        nthreads = M;
     }
 
-    pthread_t      *threads = malloc(nthreads * sizeof(pthread_t));
-    thread_args_t  *args    = malloc(nthreads * sizeof(thread_args_t));
+    pthread_t     *threads = malloc(nthreads * sizeof(pthread_t));
+    thread_args_t *args    = malloc(nthreads * sizeof(thread_args_t));
 
     if (!threads || !args) {
         fprintf(stderr, "gemm_multithreaded: allocation failed\n");
@@ -169,24 +49,52 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
         return;
     }
 
-    // Slice C horizontally by row, evening out the remainder 
-    size_t base_rows   = logical_size / nthreads;
-    size_t remainder   = logical_size % nthreads;
-    size_t current_row = 0;
+    // Hand out whole 4-row blocks rather than rounding each slice down to a
+    // multiple of 4. Rounding down looks tidier but wrecks the load balance:
+    // at M=1024 across 24 threads it gives everyone 40 rows and dumps the
+    // leftover 104 on the last one, so the critical path is 2.4x the ideal.
+    const size_t nblocks = M / GEMM_MR; // whole 4-row blocks available
+    const size_t tail    = M % GEMM_MR; // 0 to 3 rows left over at the bottom
+
+    size_t row = 0;
 
     for (size_t t = 0; t < nthreads; t++) {
-        args[t].start_row = current_row;
+        size_t thread_rows;
 
-        size_t thread_rows = base_rows + (t < remainder ? 1 : 0);
-        args[t].end_row    = current_row + thread_rows;
+        if (nblocks < nthreads) {
+            // Not enough blocks to give every worker one, so just split the
+            // rows evenly. Slices are not multiples of 4 here and each worker
+            // peels its own bottom strip, which is fine because M is tiny.
+            thread_rows = M / nthreads + (t < M % nthreads ? 1 : 0);
+        } else {
+            // Spread the blocks out, remainder first-come, so the biggest and
+            // smallest slices differ by at most one block
+            const size_t base  = nblocks / nthreads;
+            const size_t extra = nblocks % nthreads;
 
-        args[t].logical_size = logical_size;
-        args[t].stride       = stride;
-        args[t].A            = A->data;
-        args[t].B            = B->data;
-        args[t].C            = C->data;
+            thread_rows = (base + (t < extra ? 1 : 0)) * GEMM_MR;
 
-        current_row = args[t].end_row;
+            // The odd rows at the bottom go to the last worker, which is the
+            // only one that ends up peeling a scalar strip
+            if (t == nthreads - 1) {
+                thread_rows += tail;
+            }
+        }
+
+        args[t].m_rows = thread_rows;
+        args[t].N      = N;
+        args[t].K      = K;
+
+        // Offset A and C down to this worker's first row. B is left alone,
+        // since every worker reads all of it.
+        args[t].A   = A->data + row * A->stride;
+        args[t].lda = A->stride;
+        args[t].B   = B->data;
+        args[t].ldb = B->stride;
+        args[t].C   = C->data + row * C->stride;
+        args[t].ldc = C->stride;
+
+        row += thread_rows;
     }
 
     // Spin up the worker pool
@@ -198,6 +106,15 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
             break;
         }
         spawned++;
+    }
+
+    // Any thread that never got created still has rows to compute, so run its
+    // slice here rather than silently leaving part of C unwritten
+    for (size_t t = spawned; t < nthreads; t++) {
+        gemm_tiled_simd_kernel(args[t].m_rows, args[t].N, args[t].K,
+                               args[t].A, args[t].lda,
+                               args[t].B, args[t].ldb,
+                               args[t].C, args[t].ldc);
     }
 
     // Join whichever threads actually got created

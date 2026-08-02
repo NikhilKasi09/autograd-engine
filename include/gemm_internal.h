@@ -40,6 +40,29 @@ void gemm_tiled_kernel(size_t M, size_t N, size_t K,
                        const float * restrict B, size_t ldb,
                        float * restrict C, size_t ldc);
 
+// The tiled + AVX2 kernel, shared so the threaded wrapper can call it too.
+// Peels its own ragged rows and columns, so any sub-rectangle is fine.
+void gemm_tiled_simd_kernel(size_t M, size_t N, size_t K,
+                            const float * restrict A, size_t lda,
+                            const float * restrict B, size_t ldb,
+                            float * restrict C, size_t ldc);
+
+// Everything one worker thread needs to compute its slice of C.
+// The pointers are pre-offset, so a worker never has to know where its slice
+// sits in the full matrix. It just runs a GEMM of m_rows by N.
+typedef struct {
+    size_t m_rows; // rows of C this worker owns
+    size_t N;
+    size_t K;
+
+    const float *A;   // offset to the worker's first row
+    size_t       lda;
+    const float *B;   // not offset, every worker reads all of B
+    size_t       ldb;
+    float       *C;   // offset to the worker's first row
+    size_t       ldc;
+} thread_args_t;
+
 /*
  The shape contract for C(MxN) += A(MxK) * B(KxN): the product has to be
  defined and C has to be the right shape to hold it. Every wrapper calls this.
