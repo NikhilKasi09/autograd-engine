@@ -3,3 +3,12 @@
 
 gemm_benchmark
 gemm_tests
+
+# CMake build trees, one per sanitizer configuration
+build/
+build-*/
+
+# Python
+.venv/
+__pycache__/
+*.so
