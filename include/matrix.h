@@ -3,36 +3,27 @@
 
 #include <stddef.h>
 
-// Alignment requirement for AVX2 registers. This aligns the base pointer only,
-// and says nothing about where any individual row starts (see stride below).
+// Alignment for AVX2 registers. Applies to the base pointer only, not to
+// where any individual row starts.
 #define ALIGNMENT_REQ 32
 
 typedef struct {
     size_t rows;
     size_t cols;
 
-    /*
-     Floats from the start of one row to the start of the next.
-
-     matrix_create always sets stride == cols, so there is no padding. The
-     field is kept separate anyway because the invariant is stride >= cols,
-     which is the seam a padded allocation or a view onto a bigger matrix can
-     come through later without a single kernel having to change.
-    */
+    // Floats from the start of one row to the start of the next.
+    // matrix_create always sets this to cols, so there is no padding. It stays
+    // a separate field because the invariant is stride >= cols, which is how a
+    // view onto a bigger matrix arrives later without changing any kernel.
     size_t stride;
 
     float *data;
 } matrix_t;
 
-/*
- Allocates and zero-initialises a rows x cols matrix, row-major.
-
- The data block is 32-byte aligned, but row i starts at data + i * stride and
- is only 32-byte aligned when stride % 8 == 0, which nothing guarantees. The
- kernels use unaligned loads for that reason.
-
- Returns NULL if either dimension is zero or the allocation fails.
-*/
+// Allocates and zero-initialises a rows x cols matrix, row-major.
+// The block is 32-byte aligned but row i sits at data + i * stride, which is
+// only aligned when stride % 8 == 0, hence the unaligned loads in the kernels.
+// Returns NULL on a zero dimension or a failed allocation.
 matrix_t *matrix_create(size_t rows, size_t cols);
 
 // Safely frees the aligned memory block and the struct

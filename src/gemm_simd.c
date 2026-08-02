@@ -3,30 +3,21 @@
 #include <immintrin.h>
 #include <stdio.h>
 
-/*
- Private AVX2 kernel. C(MxN) += A(MxK) * B(KxN), row-major throughout.
-
- This is the "just SIMD" rung of the ladder, so it stays self-contained: no
- tiling, and its own scalar tail rather than a call out to gemm_tiled_kernel.
- The job here is to establish the vector-then-remainder pattern on the simplest
- possible body, before step G has to do the same thing inside a tile loop.
-
- The columns split in two:
-
-     [0, N8)   handled 8 at a time by the vector loop, where N8 = N - N % 8
-     [N8, N)   the 0 to 7 left over, handled by the scalar tail
-
- Every element of C is written by exactly one of those two paths, so there is
- no question of one being counted twice or missed. The two paths sum over k in
- the same order, but they will not always agree to the last bit, because FMA
- does not round the intermediate product while the scalar path does. That is
- expected and the tolerance in the test harness accounts for it.
-
- Loads and stores are the unaligned forms. Only the base pointer of a matrix is
- 32-byte aligned; row i starts at data + i * stride, which is aligned only when
- stride % 8 == 0, and nothing guarantees that. vmovups on an aligned address
- costs the same as vmovaps on AVX2, so nothing is lost.
-*/
+// Private AVX2 kernel. C(MxN) += A(MxK) * B(KxN), row-major.
+//
+// The plain SIMD rung, so it stays self-contained: no tiling, and its own
+// scalar tail rather than calling gemm_tiled_kernel.
+//
+// Columns split in two, with N8 = N - N % 8:
+//     [0, N8)   eight at a time in the vector loop
+//     [N8, N)   the 0 to 7 left over, in the scalar tail
+// Each element of C is written by exactly one of them, so nothing is missed or
+// counted twice. They will not agree to the last bit, since FMA does not round
+// the intermediate product and the scalar path does.
+//
+// Loads and stores are unaligned: only the base pointer is 32-byte aligned,
+// and row i sits at data + i * stride. vmovups on an aligned address costs the
+// same as vmovaps on AVX2.
 static void gemm_avx2_kernel(size_t M, size_t N, size_t K,
                              const float * restrict A, size_t lda,
                              const float * restrict B, size_t ldb,
@@ -61,13 +52,8 @@ static void gemm_avx2_kernel(size_t M, size_t N, size_t K,
             _mm256_storeu_ps(&C[i * ldc + j], acc); // Store the accumulated result back into the correct 8 slots in C 
         }
 
-        /*
-         Scalar tail: columns [N8, N), which is 0 to 7 columns wide.
-
-         Reading the running total into acc, adding to it and writing it back
-         keeps the += contract that the vector path above also has to keep. It
-         is not a plain assignment.
-        */
+        // Scalar tail: columns [N8, N), so 0 to 7 wide. Reads the running
+        // total, adds to it and writes it back, keeping the += contract.
         for (size_t j = N8; j < N; j++) {
             float acc = C[i * ldc + j];
 

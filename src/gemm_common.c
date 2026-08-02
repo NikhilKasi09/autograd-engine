@@ -12,26 +12,3 @@ int gemm_check_shapes(const char *who, const matrix_t *A, const matrix_t *B,
 
     return 1;
 }
-
-int gemm_shapes_square_ok(const char *who, const matrix_t *A, const matrix_t *B,
-                          const matrix_t *C) {
-    if (!gemm_check_shapes(who, A, B, C)) {
-        return 0;
-    }
-
-    // The kernel body still takes one N for all three matrices
-    if (A->rows != A->cols || B->rows != B->cols || C->rows != C->cols) {
-        fprintf(stderr, "%s: kernel is square only for now, got %zux%zu * %zux%zu\n", who,
-                A->rows, A->cols, B->rows, B->cols);
-        return 0;
-    }
-
-    // ...and one stride, which holds while nothing hands out views
-    if (A->stride != B->stride || A->stride != C->stride) {
-        fprintf(stderr, "%s: kernel needs one stride for all three, got %zu, %zu, %zu\n", who,
-                A->stride, B->stride, C->stride);
-        return 0;
-    }
-
-    return 1;
-}

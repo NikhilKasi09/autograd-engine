@@ -8,7 +8,7 @@
 
 void gemm_multithreaded_wrapper(const matrix_t *A, const matrix_t *B, matrix_t *C) {
     // Spawning 8 threads for the benchmark run
-    gemm_multithreaded(A, B, C, 8); 
+    gemm_multithreaded(A, B, C, 8);
 }
 
 // Struct to hold kernel metadata for our testing loop
@@ -17,36 +17,51 @@ typedef struct {
     gemm_kernel_ptr func;
 } kernel_info_t;
 
-int main() {
-    size_t sizes[] = {256, 512, 1024};
-    int num_sizes = sizeof(sizes) / sizeof(sizes[0]);
+// C is M x N, A is M x K, B is K x N
+typedef struct {
+    size_t M, N, K;
+    const char *note;
+} bench_shape_t;
 
-    // Registry tailored to your specific output format
+int main(void) {
+    bench_shape_t shapes[] = {
+        { 256,  256,  256, "square"},
+        { 512,  512,  512, "square"},
+        {1024, 1024, 1024, "square"},
+        { 128,  256,  512, "non-square"},
+        { 512, 1024,  256, "non-square"},
+        {1023, 1023, 1023, "ragged, worst case for the scalar strips"}
+    };
+    int num_shapes = sizeof(shapes) / sizeof(shapes[0]);
+
+    // Full ladder, slowest first. The slower rungs stay in on purpose.
     kernel_info_t kernels[] = {
-        {"Naive (ijk)", gemm_naive},
-        {"Local (ikj)", gemm_ikj},
-        {"Tiled + AVX2", gemm_tiled_simd},
-        {"Multithreaded", gemm_multithreaded_wrapper}
+        {"Naive (ijk)",    gemm_naive},
+        {"Local (ikj)",    gemm_ikj},
+        {"Tiled",          gemm_tiled},
+        {"AVX2",           gemm_avx2},
+        {"Tiled + AVX2",   gemm_tiled_simd},
+        {"Multithreaded",  gemm_multithreaded_wrapper}
     };
     int num_kernels = sizeof(kernels) / sizeof(kernels[0]);
 
-    for (int s = 0; s < num_sizes; s++) {
-        size_t N = sizes[s];
-        
-        matrix_t *A = matrix_create(N, N);
-        matrix_t *B = matrix_create(N, N);
-        matrix_t *C = matrix_create(N, N);
-        matrix_t *expected_C = matrix_create(N, N);
+    for (int s = 0; s < num_shapes; s++) {
+        size_t M = shapes[s].M, N = shapes[s].N, K = shapes[s].K;
+
+        matrix_t *A = matrix_create(M, K);
+        matrix_t *B = matrix_create(K, N);
+        matrix_t *C = matrix_create(M, N);
+        matrix_t *expected_C = matrix_create(M, N);
 
         if (!A || !B || !C || !expected_C) {
-            fprintf(stderr, "Fatal: Memory allocation failed for size %zu\n", N);
+            fprintf(stderr, "Fatal: Memory allocation failed for %zux%zux%zu\n", M, N, K);
             return 1;
         }
 
         matrix_randomize(A);
         matrix_randomize(B);
 
-        printf("Matrix Size: %zu x %zu\n", N, N);
+        printf("%zu x %zu x %zu  (%s)\n", M, N, K, shapes[s].note);
         printf("--------------------------------------------------\n");
         printf("%-18s | %-9s | %s\n", "Implementation", "Time (ms)", "Performance");
         printf("--------------------------------------------------\n");
@@ -63,12 +78,10 @@ int main() {
                 matrix_copy(expected_C, C);
                 naive_time = res.elapsed_seconds;
             } else {
-                // For all other kernels, prove they match the Naive output.
-                // matrices_match now reports and returns 0 rather than calling
-                // exit(1) itself, so the bail-out lives here.
+                // For all other kernels, prove they match the Naive output
                 if (!matrices_match(expected_C, C)) {
-                    fprintf(stderr, "Validation failed for %s at size %zu\n",
-                            kernels[k].name, N);
+                    fprintf(stderr, "Validation failed for %s at %zux%zux%zu\n",
+                            kernels[k].name, M, N, K);
                     return 1;
                 }
             }
@@ -78,15 +91,15 @@ int main() {
             }
 
             // Print formatted row
-            printf("%d. %-15s | %-9.2f | %.2f GFLOP/s\n", 
+            printf("%d. %-15s | %-9.2f | %.2f GFLOP/s\n",
                    k + 1,
-                   kernels[k].name, 
-                   res.elapsed_seconds * 1000.0, 
+                   kernels[k].name,
+                   res.elapsed_seconds * 1000.0,
                    res.gigaflops);
         }
-        
+
         printf("--------------------------------------------------\n");
-        
+
         double total_speedup = (final_time > 0.0) ? (naive_time / final_time) : 0.0;
         printf("Total Speedup: %.1fx\n\n", total_speedup);
 
@@ -94,7 +107,7 @@ int main() {
         matrix_free(A);
         matrix_free(B);
         matrix_free(C);
-        matrix_free(expected_C); 
+        matrix_free(expected_C);
     }
 
     return 0;

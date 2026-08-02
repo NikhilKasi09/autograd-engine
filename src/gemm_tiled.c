@@ -4,28 +4,16 @@
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-/*
- Cache-tiled scalar kernel. Declared in gemm_internal.h rather than being
- private here, because the vector kernels call it for their ragged edges.
-
- The three tile loops are independent now. Each one walks its own dimension and
- works out its own extent, so a trailing tile is simply smaller than the rest
- in whichever dimensions happen to be ragged. There is no requirement that M, N
- and K relate to each other or to BLOCK_SIZE in any way.
-
- Note the extents are worked out as counts rather than as clamped absolute
- indices:
-
-     const size_t mt = MIN(BLOCK_SIZE, M - block_i);
-
- Since block_i < M is the loop condition, M - block_i cannot underflow. The
- alternative, clamping block_i + BLOCK_SIZE against M and then subtracting,
- is where unsigned arithmetic goes wrong in this file's neighbours.
-
- Working inside the tile on offset pointers keeps the inner loops free of
- block_i and block_j entirely, so what is left reads as a small dense GEMM,
- which is exactly what it is.
-*/
+// Cache-tiled scalar kernel. Declared in gemm_internal.h because the vector
+// kernels call it for their ragged edges.
+//
+// The three tile loops are independent and each works out its own extent, so a
+// trailing tile is just smaller in whichever dimensions are ragged. M, N and K
+// need no relationship to each other or to BLOCK_SIZE.
+//
+// Extents are counts, not clamped absolute indices. block_i < M is the loop
+// condition, so M - block_i cannot underflow. Clamping block_i + BLOCK_SIZE
+// against M and subtracting is what goes wrong in the SIMD kernels.
 void gemm_tiled_kernel(size_t M, size_t N, size_t K,
                        const float * restrict A, size_t lda,
                        const float * restrict B, size_t ldb,
@@ -41,14 +29,14 @@ void gemm_tiled_kernel(size_t M, size_t N, size_t K,
             for (size_t block_j = 0; block_j < N; block_j += BLOCK_SIZE) {
                 const size_t nt = MIN(BLOCK_SIZE, N - block_j);
 
-                // Top left corner of this tile in each matrix. The leading
-                // dimensions stay those of the full matrices.
+                // Top left corner of this tile. Leading dimensions stay those
+                // of the full matrices, so the inner loops drop block_i and
+                // block_j out of their address arithmetic entirely.
                 const float *A_tile = A + block_i * lda + block_k;
                 const float *B_tile = B + block_k * ldb + block_j;
                 float       *C_tile = C + block_i * ldc + block_j;
 
-                // Inner loops, in ikj order so the innermost one walks B and C
-                // along their rows
+                // ikj order, so the innermost loop walks B and C along rows
                 for (size_t i = 0; i < mt; i++) {
                     for (size_t k = 0; k < kt; k++) {
 

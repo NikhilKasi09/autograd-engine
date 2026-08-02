@@ -41,15 +41,10 @@ matrix_t *matrix_create(size_t rows, size_t cols) {
     size_t num_elements = rows * cols;
     size_t num_bytes    = num_elements * sizeof(float);
 
-    /*
-     Allocate the 32-byte aligned memory for the matrix data.
-
-     This aligns the base pointer only. Row i starts at data + i * stride,
-     which is 32-byte aligned only when stride % 8 == 0, so the kernels cannot
-     assume anything and use unaligned loads. Keeping the aligned allocation
-     costs nothing and leaves the door open for a padded-stride experiment
-     later.
-    */
+    // Allocate the 32-byte aligned memory for the matrix data. This aligns the
+    // base pointer only: row i sits at data + i * stride, aligned only when
+    // stride % 8 == 0, which is why the kernels use unaligned loads. Keeping
+    // it costs nothing and leaves room for a padded-stride experiment later.
     void *aligned_ptr = NULL;
     int align_status = posix_memalign(&aligned_ptr, ALIGNMENT_REQ, num_bytes);
 
@@ -100,9 +95,8 @@ void matrix_zero(matrix_t *mat) {
         return;
     }
 
-    // One memset per row rather than one for rows * stride. They are the same
-    // thing while stride == cols, but the row loop stays correct the day this
-    // matrix is a view onto a larger one.
+    // One memset per row, not one for rows * stride. Same thing while
+    // stride == cols, but stays correct once a matrix can be a view.
     for (size_t i = 0; i < mat->rows; i++) {
         memset(&mat->data[i * mat->stride], 0, mat->cols * sizeof(float));
     }

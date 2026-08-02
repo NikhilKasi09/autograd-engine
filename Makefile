@@ -38,14 +38,11 @@ RUNNER =
 test: $(TEST_TARGET)
 	$(RUNNER) ./$(TEST_TARGET)
 
-# Sanitiser builds. CFLAGS uses ?= so the recursive assignment below wins, but
-# LDFLAGS uses = and has to be overridden by hand since the sanitisers are
-# needed at link time too. Both targets clean first, otherwise stale
-# uninstrumented objects get linked in without any warning.
-#
-# -O1 rather than -O0 because a -O0 build is not worth measuring, and it keeps
-# naive at 256 down to a couple of seconds under instrumentation.
-# -fno-sanitize-recover=all makes UBSan fail rather than print and carry on.
+# Sanitiser builds. LDFLAGS has to be overridden by hand as well as CFLAGS,
+# since the sanitisers are needed at link time too. Both targets clean first,
+# or stale uninstrumented objects get linked in silently.
+# -O1 keeps naive down to a couple of seconds under instrumentation, and
+# -fno-sanitize-recover makes UBSan fail rather than print and carry on.
 SAN_CFLAGS = -Wall -Wextra -Werror -pedantic -g -O1 -fno-omit-frame-pointer \
              -mavx2 -mfma -pthread -Iinclude -MMD -MP
 
@@ -54,16 +51,14 @@ asan:
 	$(MAKE) CFLAGS="$(SAN_CFLAGS) -fsanitize=address,undefined -fno-sanitize-recover=all" \
 	        LDFLAGS="-lm -fsanitize=address,undefined" test
 
-# TSan cannot be combined with ASan, so it gets its own target. This is the one
-# that catches two workers writing to overlapping rows, which is what the
-# end_i - 4 underflow does when a thread owns fewer than 4 rows.
+# TSan cannot combine with ASan, so it gets its own target. This is the one
+# that catches two workers writing to overlapping rows.
 #
 # setarch -R turns off ASLR for the run. Ubuntu 24.04 defaults to
-# vm.mmap_rnd_bits=32 but TSan's shadow memory layout only handles up to 28, so
-# without this the binary either segfaults or dies with "FATAL:
-# ThreadSanitizer: unexpected memory mapping". It comes and goes depending on
-# where the loader happened to map things, and it is nothing to do with the
-# kernels. Setting vm.mmap_rnd_bits=28 with sysctl fixes it system-wide.
+# vm.mmap_rnd_bits=32 but TSan only handles up to 28, so without it the binary
+# segfaults or dies with "unexpected memory mapping", intermittently depending
+# on where the loader mapped things. sysctl vm.mmap_rnd_bits=28 fixes it
+# system-wide instead.
 tsan:
 	$(MAKE) clean
 	$(MAKE) CFLAGS="$(SAN_CFLAGS) -fsanitize=thread -fno-sanitize-recover=all" \

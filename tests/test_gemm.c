@@ -1,20 +1,18 @@
 /*
  Correctness harness for the GEMM kernel ladder.
 
- Every kernel is checked against reference_gemm() below, which is a plain
- triple loop over densely packed buffers with no leading-dimension arithmetic.
- gemm_naive gets tested the same way as everything else instead of being used
- as the source of truth, so a bug in it cannot quietly bless the other five.
+ Every kernel is checked against reference_gemm() below, a plain triple loop
+ with no leading-dimension arithmetic. gemm_naive is tested like everything
+ else rather than used as the source of truth, so a bug in it cannot bless the
+ other five.
 
- The kernels do not all become general at the same time, and two of them are
- already broken on shapes this file has to cover eventually (see PLAN.md).
- So each registry entry carries a mask of the shapes it cannot handle yet, and
- a violated restriction prints SKIP with a reason instead of FAIL. Phase 1 is
- finished when every mask is empty and the SKIP count reaches zero.
+ Each registry entry carries a mask of the shapes its kernel cannot handle yet,
+ and a violated restriction prints SKIP rather than FAIL. Every mask is empty
+ now that phase 1 is done, so the SKIP count should stay at zero.
 
- Every case runs twice, once with C zeroed and once with C holding a known
- pattern. Zeroing C before every call makes 'C = sum' and 'C += sum' look
- identical, and the backward pass in roadmap phase 6 accumulates into C.
+ Every case runs twice, once with C zeroed and once with C prefilled. Zeroing C
+ before every call makes 'C = sum' and 'C += sum' look identical, and the
+ backward pass accumulates into C.
 
  Usage:
    ./gemm_tests                 run the shape table
@@ -35,16 +33,11 @@
 // Printed on every run so that a failure can be reproduced exactly
 #define SEED 0xC0FFEE
 
-/*
- Mixed tolerance: diff > ATOL + RTOL * |expected|.
-
- A purely absolute tolerance gets marginal at large K. Inputs in [0.5, 1.5)
- with K = 256 give results near 256, where one float ULP is already about
- 1.5e-5. The SIMD kernels also differ from the scalar ones for legitimate
- reasons: FMA does not round the intermediate product, and tiling reorders the
- k-summation. max_abs_err is printed for every case so the real margin is
- visible rather than guessed at.
-*/
+// Mixed tolerance: diff > ATOL + RTOL * |expected|. A flat absolute tolerance
+// breaks down at large K, where results near 256 have a float ULP of 1.5e-5
+// and the SIMD kernels legitimately differ because FMA skips the intermediate
+// rounding and tiling reorders the k-summation. max_abs_err is printed per
+// case so the real margin is visible.
 #define ATOL 1e-5f
 #define RTOL 1e-5f
 
@@ -97,16 +90,8 @@ static const char *restriction_violated(unsigned mask, size_t M, size_t N, size_
 /* matrix_t access helpers                                                   */
 /* ------------------------------------------------------------------------ */
 
-/*
- Every access to a matrix_t goes through these three helpers, so that a change
- to the struct is a small edit here instead of a rewrite of the file. They
- earned their keep at step B, when size and padded_size became rows, cols and
- stride.
-
- mat_new can build any shape now that the allocator takes two dimensions, so
- the alloc-nonsquare path in run_shape no longer fires. It stays until the
- shape table actually goes non-square at step C.
-*/
+// Every access to a matrix_t goes through these three, so a change to the
+// struct is a small edit here instead of a rewrite of the file.
 static matrix_t *mat_new(size_t rows, size_t cols) {
     return matrix_create(rows, cols);
 }
@@ -115,8 +100,7 @@ static size_t mat_stride(const matrix_t *m) {
     return m->stride;
 }
 
-// Floats in the whole allocation. There is no padding any more, so this is
-// just rows * stride, but scrubbing still goes through one name.
+// Floats in the whole allocation, used when scrubbing C
 static size_t mat_alloc_floats(const matrix_t *m) {
     return m->rows * m->stride;
 }
@@ -125,14 +109,12 @@ static size_t mat_alloc_floats(const matrix_t *m) {
 /* Reference implementation                                                  */
 /* ------------------------------------------------------------------------ */
 
-/*
- C(MxN) += A(MxK) * B(KxN), all three buffers packed row-major with no
- leading dimensions. Deliberately the simplest loop nest that could work.
-
- The accumulator is a double rather than a float. This is the thing every
- kernel gets judged against, so it should carry less rounding error than they
- do, not the same amount in a different order.
-*/
+// C(MxN) += A(MxK) * B(KxN), all three packed with no leading dimensions.
+// The simplest loop nest that could work, on purpose.
+//
+// The accumulator is a double. This is what every kernel is judged against, so
+// it should carry less rounding error than they do, not the same amount in a
+// different order.
 static void reference_gemm(size_t M, size_t N, size_t K, const float *A, const float *B,
                            float *C) {
     for (size_t i = 0; i < M; i++) {
@@ -150,23 +132,18 @@ static void reference_gemm(size_t M, size_t N, size_t K, const float *A, const f
 /* Fill and compare helpers                                                  */
 /* ------------------------------------------------------------------------ */
 
-/*
- Inputs come from [0.5, 1.5) rather than [0, 1) so that no expected value can
- drift near zero and hide a missing region. A region that no kernel path wrote
- stays at 0 and a region two paths wrote is roughly 2x, and both of those need
- reliably non-zero expected values to show up.
-*/
+// Inputs from [0.5, 1.5) rather than [0, 1), so no expected value can drift
+// near zero and hide a missing region. A region no path wrote stays 0 and one
+// two paths wrote is roughly 2x; both need non-zero expected values to show up.
 static void fill_random(float *buf, size_t n) {
     for (size_t i = 0; i < n; i++) {
         buf[i] = 0.5f + ((float)rand() / (float)RAND_MAX);
     }
 }
 
-/*
- Bounded prefill pattern in [1.0, 2.5]. The bound matters: an unbounded ramp
- reaches about 8192 at 128x256, which dwarfs the ~512 product term and waters
- the relative tolerance down until the accumulate check stops discriminating.
-*/
+// Prefill pattern, bounded to [1.0, 2.5]. The bound matters: an unbounded ramp
+// hits ~8192 at 128x256, which dwarfs the ~512 product term and waters the
+// relative tolerance down until the accumulate check stops discriminating.
 static float prefill_value(size_t i, size_t j, size_t N) {
     return 1.0f + (float)((i * N + j) % 7u) * 0.25f;
 }
@@ -190,9 +167,7 @@ static void make_prefill(float *buf, size_t M, size_t N, prefill_mode_t mode) {
 static void scatter_to_matrix(matrix_t *dst, const float *src, size_t rows, size_t cols) {
     const size_t stride = mat_stride(dst);
 
-    // Scrub the whole allocation first, padding included. The SIMD kernels are
-    // allowed to accumulate into padding columns today, and stale values there
-    // would otherwise carry over from the previous run.
+    // Scrub the whole allocation first so nothing carries over between runs
     memset(dst->data, 0, mat_alloc_floats(dst) * sizeof(float));
 
     for (size_t i = 0; i < rows; i++) {
@@ -280,19 +255,9 @@ typedef struct {
     int              nthreads; /* 0 for the single-threaded kernels */
 } kernel_entry_t;
 
-/*
- Masks follow the capability table in PLAN.md, currently the step C column.
- They burn down to zero over steps D to H, so this array doubles as the
- progress tracker.
-
- naive is first out, and is now the only kernel that runs the whole table.
-
- N_MULT8 arrived for the three SIMD kernels at step B. Those kernels step the
- j loop in whole vectors with no scalar tail, and 63, 65 and 127 only ever
- worked because the allocator quietly rounded the stride up to 64 or 128. With
- stride == cols the vector loop would run off the end of the row, so the
- wrappers reject those shapes until steps F and G put the tails in.
-*/
+// Every mask is empty now that all six kernels handle arbitrary shapes. The
+// enum and the checks stay because they are how a half-finished kernel gets
+// tested without failing the build, which is worth having for the next one.
 static const kernel_entry_t kernels[] = {
     {"naive",      gemm_naive,      0,                                                      0},
     {"ikj",        gemm_ikj,        0,                                                      0},
@@ -315,16 +280,10 @@ typedef struct {
     size_t M, N, K;
 } shape_t;
 
-/*
- Each dimension independently crosses the vector width (8), the register block
- (4 and 16) and the tile boundary (64), because a bug that only shows up when
- two dimensions are ragged at once is the whole risk here.
-
- The shapes that would send a kernel off unbounded, such as anything with
- N < 16 for gemm_tiled_simd, are in the table from now on and held back by the
- restriction masks rather than by being left out. That way the day a mask is
- cleared, the shape it was hiding gets run.
-*/
+// Each dimension independently crosses the vector width (8), the register
+// block (4 and 16) and the tile boundary (64). A bug that only appears when
+// two dimensions are ragged at once is the main risk, so the table has to
+// cross them independently rather than scale one number.
 static const shape_t shapes[] = {
     {  1,   1,   1}, /* degenerate                                */
     {  1, 512,   1}, /* single row, long N                        */
@@ -488,14 +447,9 @@ static size_t run_shape(shape_t s, const char *filter, tally_t *tally) {
     return failures;
 }
 
-/*
- Randomised shapes against the reference. A fixed table always misses some
- combination of edges, which is exactly what this phase is about, and each
- iteration is at most 2*80^3 = 1.0 MFLOP so the whole run costs about a second.
-
- M, N and K are drawn independently, so the ragged combinations that no
- handwritten table would think to include get covered.
-*/
+// Randomised shapes against the reference. A fixed table always misses some
+// combination of edges, and each iteration is at most 2*80^3 = 1.0 MFLOP, so
+// the whole run costs about a second. M, N and K are drawn independently.
 static size_t run_fuzz(const char *filter, tally_t *tally) {
     size_t failures = 0;
 
@@ -515,20 +469,16 @@ static size_t run_fuzz(const char *filter, tally_t *tally) {
     return failures;
 }
 
-/*
- One case checked against values worked out by hand rather than against
- reference_gemm, so that the reference itself is pinned to something.
-
-   A = [ 1  2  3  4 ]      B = [ 1  2 ]      C = [  50   60 ]
-       [ 5  6  7  8 ]          [ 3  4 ]          [ 114  140 ]
-       [ 9 10 11 12 ]          [ 5  6 ]          [ 178  220 ]
-                               [ 7  8 ]
-
- 3x2x4 is non-square in all three dimensions, and every value here is exactly
- representable in a float, so this compares exactly rather than with a
- tolerance. Runs against every kernel the restrictions allow, which is naive
- alone at step C and grows as the masks clear.
-*/
+// One case checked against values worked out by hand, so the reference itself
+// is pinned to something rather than trusted because it looks obvious.
+//
+//   A = [ 1  2  3  4 ]      B = [ 1  2 ]      C = [  50   60 ]
+//       [ 5  6  7  8 ]          [ 3  4 ]          [ 114  140 ]
+//       [ 9 10 11 12 ]          [ 5  6 ]          [ 178  220 ]
+//                               [ 7  8 ]
+//
+// Non-square in all three dimensions, and every value is exactly representable
+// in a float, so this compares exactly instead of with a tolerance.
 static size_t run_known_values(const char *filter, tally_t *tally) {
     static const float a_vals[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
     static const float b_vals[8]  = {1, 2, 3, 4, 5, 6, 7, 8};

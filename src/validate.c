@@ -2,8 +2,11 @@
 #include <math.h>
 #include <stdio.h>
 
-//tolerance to check if two floats the same
-#define TOLERANCE 1e-4f
+// Tolerance scaled by the value, since a flat 1e-4 breaks down at large K:
+// results near 256 have a float ULP of 3e-5, and FMA and tiling reorder the
+// summation so the kernels legitimately differ in the last bits.
+#define ATOL 1e-5f
+#define RTOL 1e-5f
 
 int matrices_match(const matrix_t *expected, const matrix_t *actual) {
     //see if the shape is actually the same
@@ -14,8 +17,8 @@ int matrices_match(const matrix_t *expected, const matrix_t *actual) {
         return 0;
     }
 
-    // Two index expressions, not one. The old code indexed both matrices with
-    // the expected matrix's stride, which is wrong the moment the two differ.
+    // Two index expressions, one per matrix. Using the expected matrix's
+    // stride for both goes wrong the moment the two differ.
     for (size_t i = 0; i < expected->rows; i++) {
         for (size_t j = 0; j < expected->cols; j++) {
             size_t e_index = i * expected->stride + j;
@@ -23,7 +26,7 @@ int matrices_match(const matrix_t *expected, const matrix_t *actual) {
 
             float diff = fabsf(expected->data[e_index] - actual->data[a_index]);
 
-            if (diff > TOLERANCE) {
+            if (diff > ATOL + RTOL * fabsf(expected->data[e_index])) {
                 fprintf(stderr,
                         "Mismatch at [%zu][%zu]: expected=%f, actual=%f, diff=%f\n",
                         i, j, expected->data[e_index], actual->data[a_index], diff);

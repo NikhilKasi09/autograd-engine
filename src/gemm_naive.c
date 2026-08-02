@@ -1,21 +1,15 @@
 #include "gemm.h"
 #include "gemm_internal.h"
 
-/*
- Private internal kernel. C(MxN) += A(MxK) * B(KxN), row-major throughout.
-
- The leading dimensions are what make this work on anything other than a whole
- matrix. lda is the distance in floats from one row of A to the next, which is
- not the same as the number of columns being read: a caller wanting a
- sub-rectangle passes a pointer into the middle of a bigger matrix along with
- the extents it wants, and the leading dimension keeps the row arithmetic
- pointing at the right places. Every sub-block of work in the later kernels is
- a full GEMM on offset pointers, and this is the mechanism that allows it.
-
- Note that the pointer and its leading dimension are adjacent in the parameter
- list, so a mismatched pair is visible at the call site rather than hidden
- among six size_t arguments.
-*/
+// Private internal kernel. C(MxN) += A(MxK) * B(KxN), row-major.
+//
+// lda is the distance from one row of A to the next, which is not the same as
+// the number of columns being read. That is what lets a caller pass a pointer
+// into the middle of a bigger matrix with the extents it wants and still get
+// correct row arithmetic. Every sub-block in the later kernels works this way.
+//
+// Each pointer sits next to its own leading dimension in the parameter list,
+// so a mismatched pair is visible at the call site.
 static void gemm_naive_kernel(size_t M, size_t N, size_t K,
                               const float * restrict A, size_t lda,
                               const float * restrict B, size_t ldb,

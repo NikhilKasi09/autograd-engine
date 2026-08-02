@@ -5,13 +5,11 @@
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-/*
- Vectorised core. C(MxN) += A(MxK) * B(KxN), row-major.
-
- PRECONDITION: M % GEMM_MR == 0 and N % GEMM_VEC == 0. The caller guarantees
- this by peeling the ragged rows and columns off first, which is why there is
- no scalar cleanup anywhere in this function. K is unconstrained.
-*/
+// Vectorised core. C(MxN) += A(MxK) * B(KxN), row-major.
+//
+// Requires M % GEMM_MR == 0 and N % GEMM_VEC == 0. The caller peels the ragged
+// rows and columns off first, which is why there is no cleanup path in here.
+// K is unconstrained.
 static void gemm_tiled_simd_core(size_t M, size_t N, size_t K,
                                  const float * restrict A, size_t lda,
                                  const float * restrict B, size_t ldb,
@@ -149,47 +147,22 @@ static void gemm_tiled_simd_core(size_t M, size_t N, size_t K,
     }
 }
 
-/*
- Full kernel: peels the ragged strips, then calls the core on what is left.
+// Full kernel: peels the ragged strips, then runs the core on what is left.
+//
+// With M4 = M - M % GEMM_MR and N8 = N - N % GEMM_VEC:
+//     core    [0, M4) x [0, N8)     vectorised, no edge cases
+//     bottom  [M4, M) x [0,  N)     up to 3 rows, full width
+//     right   [0, M4) x [N8, N)     up to 7 columns
+//
+// The union is the whole of M x N and none of them overlap, so every element
+// is written by exactly one path. Peeling once here rather than inside every
+// tile is what removes the 1-row cleanup and the scalar corner from the core.
+//
+// The strips are slow out of proportion to their size, being scalar and too
+// thin for the cache: 255x255 runs at 86 GFLOP/s against 130 for 256x256,
+// where the edges are under 4% of the arithmetic. Keeping N a multiple of 8
+// and M a multiple of 4 avoids them, and _mm256_maskload_ps would remove them.
 
- The decomposition, with M4 = M - M % GEMM_MR and N8 = N - N % GEMM_VEC:
-
-     core    [0, M4) x [0, N8)     vectorised, no edge cases
-     bottom  [M4, M) x [0,  N)     up to 3 rows, full width
-     right   [0, M4) x [N8, N)     up to 7 columns
-
- Their union is the whole of M x N and no two of them overlap, so every element
- of C is written by exactly one path. That matters twice over: nothing is
- counted twice or missed, and the fact that the paths sum over k in different
- orders raises no consistency question, because no single element is ever split
- across two of them.
-
- Peeling once here rather than handling edges inside every tile is what removes
- the 1-row cleanup path and the scalar corner from the core entirely.
-
- Cost: the strips run scalar, and they cost far more than their share of the
- arithmetic. The FLOP fraction is 1 - (M4 * N8) / (M * N), which comes to 3.9%
- at 255x255 and 1.0% at 1023x1023. Measured throughput:
-
-     256x256   130.4 GFLOP/s      255x255    86.4 GFLOP/s   (-34%)
-     1024x1024  69.7 GFLOP/s     1023x1023   64.4 GFLOP/s   (-7.5%)
-
- So 3.9% of the arithmetic takes about a third of the runtime. The strips are
- scalar rather than vectorised, and a 3-row sliver has almost no reuse to give
- the cache, so it is slower per FLOP than the scalar tiled kernel working on a
- square block. Quote the measured number for the shape in question and never
- the FLOP fraction, which understates the time cost by roughly ten times.
-
- What this means in practice: keep N a multiple of 8 and M a multiple of 4 and
- none of this runs. An MLP layer is (batch, in) @ (in, out), so padding layer
- widths to multiples of 8 and batch sizes to multiples of 4 stays on the fast
- path for free. The exception is the final classification layer, where out is
- however many classes there are: 128 -> 10 puts 2 of its 10 columns on the
- scalar path.
-
- _mm256_maskload_ps would remove the strips entirely by letting the vector path
- handle a partial column block directly, and is the obvious next optimisation.
-*/
 // Not static: gemm_pthread.c runs this on each worker's slice of C
 void gemm_tiled_simd_kernel(size_t M, size_t N, size_t K,
                             const float * restrict A, size_t lda,

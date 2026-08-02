@@ -2,17 +2,14 @@
 #include "gemm.h"
 #include "gemm_internal.h"
 
-/*
- Private internal kernel. C(MxN) += A(MxK) * B(KxN), row-major throughout.
-
- Same arithmetic as gemm_naive, with the j and k loops swapped. Fixing row i of
- A and row k of B means the innermost loop walks B and C along their rows, so
- both are read and written in the order they sit in memory.
-
- The k loop bound is K and the j loop bound is N, which were the same number
- back when everything was square. Getting these the wrong way round is the
- easiest mistake to make here and shows up immediately on any non-square shape.
-*/
+// Private internal kernel. C(MxN) += A(MxK) * B(KxN), row-major.
+//
+// Same arithmetic as gemm_naive with j and k swapped. Fixing row i of A and
+// row k of B lets the innermost loop walk B and C along their rows, in the
+// order they sit in memory.
+//
+// k is bounded by K and j by N. Those were the same number while everything
+// was square, and swapping them is the easy mistake here.
 static void gemm_ikj_kernel(size_t M, size_t N, size_t K,
                             const float * restrict A, size_t lda,
                             const float * restrict B, size_t ldb,
