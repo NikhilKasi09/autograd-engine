@@ -16,10 +16,10 @@ endif()
 # would make the port and the tuning indistinguishable in the numbers.
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
-# Off during the mechanical C->C++ port so the whole warning list can be read
-# and triaged at once, rather than stopping at the first one. Flipped on as the
-# final commit of that step.
-option(GEMM_WERROR "Treat warnings as errors" OFF)
+# On now that the sources compile clean as C++. It was off for the mechanical
+# port so the whole warning list could be read and triaged in one pass rather
+# than stopping at the first one.
+option(GEMM_WERROR "Treat warnings as errors" ON)
 
 set(GEMM_SANITIZE "off" CACHE STRING "Sanitizer: off, address, or thread")
 set_property(CACHE GEMM_SANITIZE PROPERTY STRINGS off address thread)
