@@ -1,6 +1,6 @@
 #include <stdio.h>
-#include "gemm.h"
-#include "gemm_internal.h"
+#include "gemm.hpp"
+#include "gemm_internal.hpp"
 
 // Private internal kernel. C(MxN) += A(MxK) * B(KxN), row-major.
 //
@@ -11,9 +11,9 @@
 // k is bounded by K and j by N. Those were the same number while everything
 // was square, and swapping them is the easy mistake here.
 static void gemm_ikj_kernel(size_t M, size_t N, size_t K,
-                            const float * restrict A, size_t lda,
-                            const float * restrict B, size_t ldb,
-                            float * restrict C, size_t ldc) {
+                            const float * GEMM_RESTRICT A, size_t lda,
+                            const float * GEMM_RESTRICT B, size_t ldb,
+                            float * GEMM_RESTRICT C, size_t ldc) {
     for (size_t i = 0; i < M; i++) {
         for (size_t k = 0; k < K; k++) {
             float a_ik = A[i * lda + k];

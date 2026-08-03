@@ -1,5 +1,5 @@
-#include "gemm.h"
-#include "gemm_internal.h"
+#include "gemm.hpp"
+#include "gemm_internal.hpp"
 
 // Private internal kernel. C(MxN) += A(MxK) * B(KxN), row-major.
 //
@@ -11,9 +11,9 @@
 // Each pointer sits next to its own leading dimension in the parameter list,
 // so a mismatched pair is visible at the call site.
 static void gemm_naive_kernel(size_t M, size_t N, size_t K,
-                              const float * restrict A, size_t lda,
-                              const float * restrict B, size_t ldb,
-                              float * restrict C, size_t ldc) {
+                              const float * GEMM_RESTRICT A, size_t lda,
+                              const float * GEMM_RESTRICT B, size_t ldb,
+                              float * GEMM_RESTRICT C, size_t ldc) {
     for (size_t i = 0; i < M; i++) {
         for (size_t j = 0; j < N; j++) {
             for (size_t k = 0; k < K; k++) {

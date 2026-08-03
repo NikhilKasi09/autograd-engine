@@ -85,6 +85,36 @@ set_target_properties(_core PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/python")
 
 # ---------------------------------------------------------------------------
+# GEMM library
+# ---------------------------------------------------------------------------
+
+# Listed explicitly rather than globbed, so adding a kernel is a deliberate
+# edit here and the ladder stays visible in one place.
+add_library(gemm_core STATIC
+    src/benchmark.cpp
+    src/gemm_common.cpp
+    src/gemm_ikj.cpp
+    src/gemm_naive.cpp
+    src/gemm_pthread.cpp
+    src/gemm_simd.cpp
+    src/gemm_tiled.cpp
+    src/gemm_tiled_simd.cpp
+    src/matrix.cpp
+    src/validate.cpp
+)
+target_include_directories(gemm_core PUBLIC include)
+gemm_apply_flags(gemm_core)
+
+# Replaces the Makefile's -pthread. Threads::Threads carries the flag to every
+# consumer, so the linker gets it too.
+find_package(Threads REQUIRED)
+target_link_libraries(gemm_core PUBLIC Threads::Threads)
+
+add_executable(gemm_benchmark apps/benchmark_main.cpp)
+target_link_libraries(gemm_benchmark PRIVATE gemm_core)
+gemm_apply_flags(gemm_benchmark)
+
+# ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
@@ -99,12 +129,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
-# Placeholder until the shape harness is ported. It exists so that the whole
-# chain -- fetch Catch2, compile against it, register with ctest, run under the
-# setarch wrapper -- is proven now rather than at the step that depends on it.
-add_executable(gemm_tests tests/cpp/test_smoke.cpp)
-target_link_libraries(gemm_tests PRIVATE Catch2::Catch2WithMain)
+# The shape harness, still its own main() with its own PASS/FAIL reporting.
+# Converted to Catch2 in a later step; for now it is the thing that proves the
+# port did not change any kernel's behaviour.
+add_executable(gemm_tests tests/cpp/test_gemm.cpp)
+target_link_libraries(gemm_tests PRIVATE gemm_core)
 gemm_apply_flags(gemm_tests)
+
+# Keeps the Catch2 wiring exercised until the harness above moves over to it.
+add_executable(catch2_smoke tests/cpp/test_smoke.cpp)
+target_link_libraries(catch2_smoke PRIVATE Catch2::Catch2WithMain)
+gemm_apply_flags(catch2_smoke)
+add_test(NAME catch2_smoke COMMAND $<TARGET_FILE:catch2_smoke>)
 
 # TSan only supports vm.mmap_rnd_bits up to 28 and Ubuntu 24.04 defaults to 32,
 # so without ASLR off the binary dies intermittently with "unexpected memory

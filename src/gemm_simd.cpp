@@ -1,5 +1,5 @@
-#include "gemm.h"
-#include "gemm_internal.h"
+#include "gemm.hpp"
+#include "gemm_internal.hpp"
 #include <immintrin.h>
 #include <stdio.h>
 
@@ -19,9 +19,9 @@
 // and row i sits at data + i * stride. vmovups on an aligned address costs the
 // same as vmovaps on AVX2.
 static void gemm_avx2_kernel(size_t M, size_t N, size_t K,
-                             const float * restrict A, size_t lda,
-                             const float * restrict B, size_t ldb,
-                             float * restrict C, size_t ldc) {
+                             const float * GEMM_RESTRICT A, size_t lda,
+                             const float * GEMM_RESTRICT B, size_t ldb,
+                             float * GEMM_RESTRICT C, size_t ldc) {
 
     // Largest multiple of the vector width that fits in N. Written as a
     // subtraction of the remainder, so there is nothing to underflow: N8 <= N

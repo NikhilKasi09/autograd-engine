@@ -26,9 +26,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "benchmark.h" /* gemm_kernel_ptr */
-#include "gemm.h"
-#include "matrix.h"
+#include "benchmark.hpp" /* gemm_kernel_ptr */
+#include "gemm.hpp"
+#include "matrix.hpp"
 
 // Printed on every run so that a failure can be reproduced exactly
 #define SEED 0xC0FFEE
@@ -332,10 +332,10 @@ static size_t run_shape(shape_t s, const char *filter, tally_t *tally) {
     const size_t M = s.M, N = s.N, K = s.K;
     size_t failures = 0;
 
-    float *a_buf   = malloc(M * K * sizeof(float));
-    float *b_buf   = malloc(K * N * sizeof(float));
-    float *c_seed  = malloc(M * N * sizeof(float)); /* prefill pattern */
-    float *ref     = malloc(M * N * sizeof(float));
+    float *a_buf   = static_cast<float*>(malloc(M * K * sizeof(float)));
+    float *b_buf   = static_cast<float*>(malloc(K * N * sizeof(float)));
+    float *c_seed  = static_cast<float*>(malloc(M * N * sizeof(float))); /* prefill pattern */
+    float *ref     = static_cast<float*>(malloc(M * N * sizeof(float)));
 
     matrix_t *A = mat_new(M, K);
     matrix_t *B = mat_new(K, N);

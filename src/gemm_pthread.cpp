@@ -1,5 +1,5 @@
-#include "gemm.h"
-#include "gemm_internal.h"
+#include "gemm.hpp"
+#include "gemm_internal.hpp"
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,8 +39,8 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
         nthreads = M;
     }
 
-    pthread_t     *threads = malloc(nthreads * sizeof(pthread_t));
-    thread_args_t *args    = malloc(nthreads * sizeof(thread_args_t));
+    pthread_t     *threads = static_cast<pthread_t*>(malloc(nthreads * sizeof(pthread_t)));
+    thread_args_t *args    = static_cast<thread_args_t*>(malloc(nthreads * sizeof(thread_args_t)));
 
     if (!threads || !args) {
         fprintf(stderr, "gemm_multithreaded: allocation failed\n");

@@ -1,4 +1,4 @@
-#include "gemm_internal.h"
+#include "gemm_internal.hpp"
 #include <stdio.h>
 
 int gemm_check_shapes(const char *who, const matrix_t *A, const matrix_t *B,

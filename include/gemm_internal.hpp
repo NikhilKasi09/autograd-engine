@@ -1,7 +1,12 @@
 #ifndef GEMM_INTERNAL_H
 #define GEMM_INTERNAL_H
 
-#include "matrix.h"
+#include "matrix.hpp"
+
+// Cs `restrict` was never adopted into C++. __restrict is the compiler
+// extension with identical semantics, spelled the same way by gcc, clang and
+// MSVC. Load-bearing for performance, not cosmetic — see docs/cpp-notes.md.
+#define GEMM_RESTRICT __restrict
 
 // Kernel tuning parameters. These used to live in matrix.h, which is how the
 // allocator ended up padding every matrix to a multiple of BLOCK_SIZE.
@@ -16,16 +21,16 @@
 // rather than a plain triple loop because an Mx7xK strip at K=1024 walks B
 // down a column and is slow enough to matter.
 void gemm_tiled_kernel(size_t M, size_t N, size_t K,
-                       const float * restrict A, size_t lda,
-                       const float * restrict B, size_t ldb,
-                       float * restrict C, size_t ldc);
+                       const float * GEMM_RESTRICT A, size_t lda,
+                       const float * GEMM_RESTRICT B, size_t ldb,
+                       float * GEMM_RESTRICT C, size_t ldc);
 
 // Tiled + AVX2 kernel, shared so the threaded wrapper can call it too.
 // Peels its own ragged rows and columns, so any sub-rectangle is fine.
 void gemm_tiled_simd_kernel(size_t M, size_t N, size_t K,
-                            const float * restrict A, size_t lda,
-                            const float * restrict B, size_t ldb,
-                            float * restrict C, size_t ldc);
+                            const float * GEMM_RESTRICT A, size_t lda,
+                            const float * GEMM_RESTRICT B, size_t ldb,
+                            float * GEMM_RESTRICT C, size_t ldc);
 
 // What one worker thread needs to compute its slice of C. The pointers are
 // pre-offset, so a worker just runs a GEMM of m_rows by N and never needs to

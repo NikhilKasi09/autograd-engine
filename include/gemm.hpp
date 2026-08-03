@@ -1,7 +1,7 @@
 #ifndef GEMM_H
 #define GEMM_H
 
-#include "matrix.h"
+#include "matrix.hpp"
 
 /*
  All matrices are row-major, and every kernel computes C += A * B rather than

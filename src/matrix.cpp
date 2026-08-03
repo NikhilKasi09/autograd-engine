@@ -2,7 +2,7 @@
 // through today because gcc defaults to gnu17. Ask for it explicitly.
 #define _POSIX_C_SOURCE 200112L
 
-#include "matrix.h"
+#include "matrix.hpp"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -23,7 +23,7 @@ matrix_t *matrix_create(size_t rows, size_t cols) {
     }
 
     // Allocate standard memory for the struct
-    matrix_t *mat = malloc(sizeof(matrix_t));
+    matrix_t *mat = static_cast<matrix_t*>(malloc(sizeof(matrix_t)));
     // Ensure malloc succeeded
     if (mat == NULL) {
         fprintf(stderr, "Error: malloc failed to allocate matrix struct.\n");

@@ -1,5 +1,5 @@
-#include "gemm.h"
-#include "gemm_internal.h"
+#include "gemm.hpp"
+#include "gemm_internal.hpp"
 #include <immintrin.h>
 #include <stdio.h>
 
@@ -11,9 +11,9 @@
 // rows and columns off first, which is why there is no cleanup path in here.
 // K is unconstrained.
 static void gemm_tiled_simd_core(size_t M, size_t N, size_t K,
-                                 const float * restrict A, size_t lda,
-                                 const float * restrict B, size_t ldb,
-                                 float * restrict C, size_t ldc) {
+                                 const float * GEMM_RESTRICT A, size_t lda,
+                                 const float * GEMM_RESTRICT B, size_t ldb,
+                                 float * GEMM_RESTRICT C, size_t ldc) {
 
     for (size_t block_i = 0; block_i < M; block_i += BLOCK_SIZE) {
 
@@ -165,9 +165,9 @@ static void gemm_tiled_simd_core(size_t M, size_t N, size_t K,
 
 // Not static: gemm_pthread.c runs this on each worker's slice of C
 void gemm_tiled_simd_kernel(size_t M, size_t N, size_t K,
-                            const float * restrict A, size_t lda,
-                            const float * restrict B, size_t ldb,
-                            float * restrict C, size_t ldc) {
+                            const float * GEMM_RESTRICT A, size_t lda,
+                            const float *GEMM_RESTRICT B, size_t ldb,
+                            float * GEMM_RESTRICT C, size_t ldc) {
 
     // Largest multiples of the register block and the vector width that fit.
     // Subtracting the remainder means neither can underflow.

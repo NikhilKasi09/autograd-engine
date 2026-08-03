@@ -1,7 +1,7 @@
 #ifndef BENCHMARK_H
 #define BENCHMARK_H
 
-#include "matrix.h"
+#include "matrix.hpp"
 
 typedef struct {
     double elapsed_seconds;

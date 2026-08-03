@@ -1,5 +1,5 @@
-#include "gemm.h"
-#include "gemm_internal.h"
+#include "gemm.hpp"
+#include "gemm_internal.hpp"
 #include <stdio.h>
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -15,9 +15,9 @@
 // condition, so M - block_i cannot underflow. Clamping block_i + BLOCK_SIZE
 // against M and subtracting is what goes wrong in the SIMD kernels.
 void gemm_tiled_kernel(size_t M, size_t N, size_t K,
-                       const float * restrict A, size_t lda,
-                       const float * restrict B, size_t ldb,
-                       float * restrict C, size_t ldc) {
+                       const float * GEMM_RESTRICT A, size_t lda,
+                       const float * GEMM_RESTRICT B, size_t ldb,
+                       float * GEMM_RESTRICT C, size_t ldc) {
 
     // Outer loops slide the 64x64 window across the matrices
     for (size_t block_i = 0; block_i < M; block_i += BLOCK_SIZE) {

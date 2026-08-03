@@ -1,10 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "matrix.h"
-#include "gemm.h"
-#include "benchmark.h"
-#include "validate.h"
+#include "matrix.hpp"
+#include "gemm.hpp"
+#include "benchmark.hpp"
+#include "validate.hpp"
 
 void gemm_multithreaded_wrapper(const matrix_t *A, const matrix_t *B, matrix_t *C) {
     // Spawning 8 threads for the benchmark run
