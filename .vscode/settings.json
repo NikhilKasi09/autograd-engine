@@ -1,0 +1,22 @@
+{
+    // Point IntelliSense at the real compiler flags rather than letting it
+    // guess. Without this it does not know about -mavx2 and reports every
+    // _mm256_* intrinsic in the SIMD kernels as an undefined identifier.
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+    "C_Cpp.default.cppStandard": "c++20",
+
+    // Squiggles come from the IntelliSense engine as you type; the CMake build
+    // is still the source of truth for what actually compiles.
+    "C_Cpp.errorSquiggles": "enabled",
+    "C_Cpp.intelliSenseEngine": "default",
+
+    // The Release tree is the one with compile_commands.json above.
+    "cmake.buildDirectory": "${workspaceFolder}/build",
+    "cmake.configureArgs": [
+        "-DCMAKE_BUILD_TYPE=Release"
+    ],
+
+    "files.associations": {
+        "*.hpp": "cpp"
+    }
+}

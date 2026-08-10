@@ -5,6 +5,11 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Writes build/compile_commands.json, which is how an editor's language server
+# learns the real flags. Without -mavx2 it reports every _mm256_* intrinsic as
+# undefined, and without -std=c++20 it rejects the class.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Default to Release. An -O0 build's benchmark numbers are meaningless, and
 # forgetting -DCMAKE_BUILD_TYPE is the easiest way to produce one by accident.
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
