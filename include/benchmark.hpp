@@ -8,17 +8,17 @@ typedef struct {
     double gigaflops;
 } benchmark_result_t;
 
-typedef void (*gemm_kernel_ptr)(const matrix_t *A, const matrix_t *B, matrix_t *C);
+typedef void (*gemm_kernel_ptr)(const Matrix &A, const Matrix &B, Matrix &C);
 
 /**
  * @brief Wraps a hardware timer around a math kernel and calculates throughput.
  *
  * @param kernel A function pointer to the specific GEMM implementation.
- * @param A Pointer to the first input matrix.
- * @param B Pointer to the second input matrix.
- * @param C Pointer to the output matrix.
+ * @param A The first input matrix.
+ * @param B The second input matrix.
+ * @param C The output matrix, accumulated into.
  * @return A struct containing the exact execution time and GigaFLOP/s.
  */
-benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const matrix_t *A, const matrix_t *B, matrix_t *C);
+benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const Matrix &A, const Matrix &B, Matrix &C);
 
 #endif

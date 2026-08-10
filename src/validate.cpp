@@ -8,32 +8,32 @@
 #define ATOL 1e-5f
 #define RTOL 1e-5f
 
-int matrices_match(const matrix_t *expected, const matrix_t *actual) {
+bool matrices_match(const Matrix &expected, const Matrix &actual) {
     //see if the shape is actually the same
-    if (expected->rows != actual->rows || expected->cols != actual->cols) {
+    if (expected.rows() != actual.rows() || expected.cols() != actual.cols()) {
         fprintf(stderr,
                 "Shape mismatch (expected=%zux%zu, actual=%zux%zu)\n",
-                expected->rows, expected->cols, actual->rows, actual->cols);
-        return 0;
+                expected.rows(), expected.cols(), actual.rows(), actual.cols());
+        return false;
     }
 
     // Two index expressions, one per matrix. Using the expected matrix's
     // stride for both goes wrong the moment the two differ.
-    for (size_t i = 0; i < expected->rows; i++) {
-        for (size_t j = 0; j < expected->cols; j++) {
-            size_t e_index = i * expected->stride + j;
-            size_t a_index = i * actual->stride + j;
+    for (size_t i = 0; i < expected.rows(); i++) {
+        for (size_t j = 0; j < expected.cols(); j++) {
+            size_t e_index = i * expected.stride() + j;
+            size_t a_index = i * actual.stride() + j;
 
-            float diff = fabsf(expected->data[e_index] - actual->data[a_index]);
+            float diff = fabsf(expected.data()[e_index] - actual.data()[a_index]);
 
-            if (diff > ATOL + RTOL * fabsf(expected->data[e_index])) {
+            if (diff > ATOL + RTOL * fabsf(expected.data()[e_index])) {
                 fprintf(stderr,
                         "Mismatch at [%zu][%zu]: expected=%f, actual=%f, diff=%f\n",
-                        i, j, expected->data[e_index], actual->data[a_index], diff);
-                return 0;
+                        i, j, expected.data()[e_index], actual.data()[a_index], diff);
+                return false;
             }
         }
     }
 
-    return 1;
+    return true;
 }

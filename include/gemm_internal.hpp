@@ -50,7 +50,7 @@ typedef struct {
 
 // Checks A(MxK) * B(KxN) is defined and C is the right shape to hold it.
 // Returns 1 if usable, 0 otherwise, reporting on stderr. Every wrapper calls it.
-int gemm_check_shapes(const char *who, const matrix_t *A, const matrix_t *B,
-                      const matrix_t *C);
+bool gemm_check_shapes(const char *who, const Matrix &A, const Matrix &B,
+                       const Matrix &C);
 
 #endif

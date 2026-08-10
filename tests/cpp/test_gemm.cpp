@@ -87,22 +87,24 @@ static const char *restriction_violated(unsigned mask, size_t M, size_t N, size_
 }
 
 /* ------------------------------------------------------------------------ */
-/* matrix_t access helpers                                                   */
+/* Matrix access helpers                                                     */
 /* ------------------------------------------------------------------------ */
 
-// Every access to a matrix_t goes through these three, so a change to the
-// struct is a small edit here instead of a rewrite of the file.
-static matrix_t *mat_new(size_t rows, size_t cols) {
-    return matrix_create(rows, cols);
+// Every access to a Matrix goes through these three, so a storage change is a
+// small edit here instead of a rewrite of the file. mat_new returns by value:
+// the constructor throws rather than returning null, so the callers' old
+// alloc-failure branches are gone.
+static Matrix mat_new(size_t rows, size_t cols) {
+    return Matrix(rows, cols);
 }
 
-static size_t mat_stride(const matrix_t *m) {
-    return m->stride;
+static size_t mat_stride(const Matrix &m) {
+    return m.stride();
 }
 
 // Floats in the whole allocation, used when scrubbing C
-static size_t mat_alloc_floats(const matrix_t *m) {
-    return m->rows * m->stride;
+static size_t mat_alloc_floats(const Matrix &m) {
+    return m.rows() * m.stride();
 }
 
 /* ------------------------------------------------------------------------ */
@@ -163,15 +165,15 @@ static void make_prefill(float *buf, size_t M, size_t N, prefill_mode_t mode) {
     }
 }
 
-// Copies a dense MxN buffer into a matrix_t, honouring the matrix's stride
-static void scatter_to_matrix(matrix_t *dst, const float *src, size_t rows, size_t cols) {
+// Copies a dense MxN buffer into a Matrix, honouring the matrix's stride
+static void scatter_to_matrix(Matrix &dst, const float *src, size_t rows, size_t cols) {
     const size_t stride = mat_stride(dst);
 
     // Scrub the whole allocation first so nothing carries over between runs
-    memset(dst->data, 0, mat_alloc_floats(dst) * sizeof(float));
+    memset(dst.data(), 0, mat_alloc_floats(dst) * sizeof(float));
 
     for (size_t i = 0; i < rows; i++) {
-        memcpy(&dst->data[i * stride], &src[i * cols], cols * sizeof(float));
+        memcpy(&dst.data()[i * stride], &src[i * cols], cols * sizeof(float));
     }
 }
 
@@ -183,7 +185,7 @@ typedef struct {
     float  expected, actual;
 } compare_result_t;
 
-static compare_result_t compare_to_reference(const float *ref, const matrix_t *C, size_t M,
+static compare_result_t compare_to_reference(const float *ref, const Matrix &C, size_t M,
                                              size_t N) {
     compare_result_t r;
     r.ok          = true;
@@ -197,7 +199,7 @@ static compare_result_t compare_to_reference(const float *ref, const matrix_t *C
     for (size_t i = 0; i < M; i++) {
         for (size_t j = 0; j < N; j++) {
             const float expected = ref[i * N + j];
-            const float actual   = C->data[i * stride + j];
+            const float actual   = C.data()[i * stride + j];
             const double diff    = fabs((double)expected - (double)actual);
             const double rel     = (expected != 0.0f) ? diff / fabs((double)expected) : diff;
 
@@ -230,21 +232,21 @@ static compare_result_t compare_to_reference(const float *ref, const matrix_t *C
 // gemm_multithreaded takes a thread count, so it needs one gemm_kernel_ptr
 // wrapper per count under test. Counts that hand a worker fewer than 4 rows
 // are the path that is broken today (RESTRICT_MT_4ROWS).
-static void mt1(const matrix_t *A, const matrix_t *B, matrix_t *C) {
+static void mt1(const Matrix &A, const Matrix &B, Matrix &C) {
     gemm_multithreaded(A, B, C, 1);
 }
-static void mt2(const matrix_t *A, const matrix_t *B, matrix_t *C) {
+static void mt2(const Matrix &A, const Matrix &B, Matrix &C) {
     gemm_multithreaded(A, B, C, 2);
 }
-static void mt3(const matrix_t *A, const matrix_t *B, matrix_t *C) {
+static void mt3(const Matrix &A, const Matrix &B, Matrix &C) {
     gemm_multithreaded(A, B, C, 3);
 }
-static void mt8(const matrix_t *A, const matrix_t *B, matrix_t *C) {
+static void mt8(const Matrix &A, const Matrix &B, Matrix &C) {
     gemm_multithreaded(A, B, C, 8);
 }
 // 64 threads is well past the row count of most shapes in the table, so this
 // is the one that exercises the clamp
-static void mt64(const matrix_t *A, const matrix_t *B, matrix_t *C) {
+static void mt64(const Matrix &A, const Matrix &B, Matrix &C) {
     gemm_multithreaded(A, B, C, 64);
 }
 
@@ -337,25 +339,15 @@ static size_t run_shape(shape_t s, const char *filter, tally_t *tally) {
     float *c_seed  = static_cast<float*>(malloc(M * N * sizeof(float))); /* prefill pattern */
     float *ref     = static_cast<float*>(malloc(M * N * sizeof(float)));
 
-    matrix_t *A = mat_new(M, K);
-    matrix_t *B = mat_new(K, N);
-
     if (!a_buf || !b_buf || !c_seed || !ref) {
         fprintf(stderr, "FATAL: harness allocation failed at %zux%zux%zu\n", M, N, K);
         exit(2);
     }
 
-    if (!A || !B) {
-        printf("SKIP %-11s %4zux%4zux%4zu [%-5s] alloc-failed\n", "*all*", M, N, K, "-");
-        tally->skipped += num_kernels * 2;
-        matrix_free(A);
-        matrix_free(B);
-        free(a_buf);
-        free(b_buf);
-        free(c_seed);
-        free(ref);
-        return 0;
-    }
+    // Matrix throws on a failed allocation rather than returning null, so the
+    // old alloc-failed SKIP path is unreachable and has gone.
+    Matrix A = mat_new(M, K);
+    Matrix B = mat_new(K, N);
 
     seed_for_shape(M, N, K);
     fill_random(a_buf, M * K);
@@ -406,11 +398,7 @@ static size_t run_shape(shape_t s, const char *filter, tally_t *tally) {
                 continue;
             }
 
-            matrix_t *C = mat_new(M, N);
-            if (!C) {
-                fprintf(stderr, "FATAL: could not allocate C at %zux%zu\n", M, N);
-                exit(2);
-            }
+            Matrix C = mat_new(M, N);
             scatter_to_matrix(C, c_seed, M, N);
 
             ke->func(A, B, C);
@@ -433,12 +421,9 @@ static size_t run_shape(shape_t s, const char *filter, tally_t *tally) {
                 tally->failed++;
             }
 
-            matrix_free(C);
         }
     }
 
-    matrix_free(A);
-    matrix_free(B);
     free(a_buf);
     free(b_buf);
     free(c_seed);
@@ -489,12 +474,8 @@ static size_t run_known_values(const char *filter, tally_t *tally) {
 
     printf("\n--- hand-checked 3x2x4 ---\n");
 
-    matrix_t *A = mat_new(M, K);
-    matrix_t *B = mat_new(K, N);
-    if (!A || !B) {
-        fprintf(stderr, "FATAL: allocation failed in run_known_values\n");
-        exit(2);
-    }
+    Matrix A = mat_new(M, K);
+    Matrix B = mat_new(K, N);
     scatter_to_matrix(A, a_vals, M, K);
     scatter_to_matrix(B, b_vals, K, N);
 
@@ -512,19 +493,15 @@ static size_t run_known_values(const char *filter, tally_t *tally) {
             continue;
         }
 
-        matrix_t *C = mat_new(M, N);
-        if (!C) {
-            fprintf(stderr, "FATAL: allocation failed in run_known_values\n");
-            exit(2);
-        }
-        matrix_zero(C);
+        Matrix C = mat_new(M, N);
+        C.zero();
 
         ke->func(A, B, C);
 
         bool ok = true;
         for (size_t i = 0; i < M && ok; i++) {
             for (size_t j = 0; j < N && ok; j++) {
-                const float got = C->data[i * mat_stride(C) + j];
+                const float got = C.data()[i * mat_stride(C) + j];
                 if (got != expected[i * N + j]) {
                     printf("FAIL %-11s %4zux%4zux%4zu [%-5s] at [%zu][%zu] "
                            "expected=%.1f actual=%.1f\n",
@@ -544,11 +521,8 @@ static size_t run_known_values(const char *filter, tally_t *tally) {
             tally->failed++;
         }
 
-        matrix_free(C);
     }
 
-    matrix_free(A);
-    matrix_free(B);
     return failures;
 }
 

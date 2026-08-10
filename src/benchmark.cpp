@@ -4,27 +4,27 @@
 
 #define TIMED_RUNS    5
 
-benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const matrix_t *A, const matrix_t *B, matrix_t *C) {
+benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const Matrix &A, const Matrix &B, Matrix &C) {
     
     struct timespec start, end;
     benchmark_result_t result;
     double times[TIMED_RUNS];
 
     // Scrub C clean before the warmup run
-    matrix_zero(C);
+    C.zero();
 
     // Warmup run for cold cache
     kernel(A, B, C);
 
     // Volatile sink forcing GCC to actually execute the kernel
-    volatile float sink_warmup = C->data[0];
+    volatile float sink_warmup = C.data()[0];
     (void)sink_warmup; // Suppresses the "unused variable" warning
 
     // Timed hot runs 
     for (int i = 0; i < TIMED_RUNS; i++) {
 
         // Scrub C clean BEFORE starting the hardware clock
-        matrix_zero(C);
+        C.zero();
         
         // Start clock
         clock_gettime(CLOCK_MONOTONIC, &start);
@@ -36,7 +36,7 @@ benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const matrix_t *A, cons
         clock_gettime(CLOCK_MONOTONIC, &end);
 
         // Force compiler materialization for every loop iteration
-        volatile float sink = C->data[0];
+        volatile float sink = C.data()[0];
         (void)sink;
 
         // Stitch together results and put it into the array 
@@ -60,7 +60,7 @@ benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const matrix_t *A, cons
 
     // Calculate GigaFLOP/s. Every factor is cast to double before being
     // multiplied, otherwise M * N * K overflows in size_t first.
-    double total_flops = 2.0 * (double)C->rows * (double)C->cols * (double)A->cols;
+    double total_flops = 2.0 * (double)C.rows() * (double)C.cols() * (double)A.cols();
 
     // Prevent division by zero if the clock was too fast
     if (median_seconds > 0.0) {

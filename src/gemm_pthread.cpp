@@ -18,7 +18,7 @@ static void *gemm_worker(void *raw_args) {
 }
 
 // Public Wrapper
-void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int num_threads) {
+void gemm_multithreaded(const Matrix &A, const Matrix &B, Matrix &C, int num_threads) {
     if (!gemm_check_shapes("gemm_multithreaded", A, B, C)) {
         return;
     }
@@ -29,9 +29,9 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
     }
 
     // Slicing is over the rows of C, so M is what gets divided up
-    const size_t M = C->rows;
-    const size_t N = C->cols;
-    const size_t K = A->cols;
+    const size_t M = C.rows();
+    const size_t N = C.cols();
+    const size_t K = A.cols();
 
     // Never spin up more threads than there are rows to hand out
     size_t nthreads = (size_t)num_threads;
@@ -87,12 +87,12 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
 
         // Offset A and C down to this worker's first row. B is left alone,
         // since every worker reads all of it.
-        args[t].A   = A->data + row * A->stride;
-        args[t].lda = A->stride;
-        args[t].B   = B->data;
-        args[t].ldb = B->stride;
-        args[t].C   = C->data + row * C->stride;
-        args[t].ldc = C->stride;
+        args[t].A   = A.data() + row * A.stride();
+        args[t].lda = A.stride();
+        args[t].B   = B.data();
+        args[t].ldb = B.stride();
+        args[t].C   = C.data() + row * C.stride();
+        args[t].ldc = C.stride();
 
         row += thread_rows;
     }

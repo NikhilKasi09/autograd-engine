@@ -3,7 +3,7 @@
 
 #include "matrix.hpp"
 
-// Compares two matrices element-by-element. Returns 1 if they match, 0 otherwise.
-int matrices_match(const matrix_t *expected, const matrix_t *actual);
+// Compares two matrices element-by-element. Returns true if they match.
+bool matrices_match(const Matrix &expected, const Matrix &actual);
 
 #endif

@@ -30,7 +30,7 @@
  * @param B Pointer to the second input matrix struct (read-only).
  * @param C Pointer to the output matrix struct.
  */
-void gemm_naive(const matrix_t *A, const matrix_t *B, matrix_t *C);
+void gemm_naive(const Matrix &A, const Matrix &B, Matrix &C);
 
 /**
  * @brief Computes matrix multiplication (C = A * B) using AVX2 SIMD intrinsics.
@@ -46,7 +46,7 @@ void gemm_naive(const matrix_t *A, const matrix_t *B, matrix_t *C);
  * @param B Pointer to the second input matrix struct (read-only).
  * @param C Pointer to the output matrix struct. Must be zero-initialised before call.
  */
-void gemm_avx2(const matrix_t *A, const matrix_t *B, matrix_t *C);
+void gemm_avx2(const Matrix &A, const Matrix &B, Matrix &C);
 
 /**
  * @brief Computes matrix multiplication using a 64x64 Cache-Tiled Architecture.
@@ -63,7 +63,7 @@ void gemm_avx2(const matrix_t *A, const matrix_t *B, matrix_t *C);
  * @param B Pointer to the second input matrix struct (read-only).
  * @param C Pointer to the output matrix struct.
  */
-void gemm_tiled(const matrix_t *A, const matrix_t *B, matrix_t *C);
+void gemm_tiled(const Matrix &A, const Matrix &B, Matrix &C);
 
 /**
  * @brief Computes matrix multiplication by fusing a 64x64 Cache-Tiled Architecture with 256-bit AVX2 SIMD intrinsics.
@@ -82,7 +82,7 @@ void gemm_tiled(const matrix_t *A, const matrix_t *B, matrix_t *C);
  * @param B Pointer to the second input matrix struct (read-only).
  * @param C Pointer to the output matrix struct.
  */
-void gemm_tiled_simd(const matrix_t *A, const matrix_t *B, matrix_t *C);
+void gemm_tiled_simd(const Matrix &A, const Matrix &B, Matrix &C);
 
 
 /**
@@ -105,7 +105,7 @@ void gemm_tiled_simd(const matrix_t *A, const matrix_t *B, matrix_t *C);
  * @param C Pointer to the output matrix struct. Must be zero-initialised before call.
  * @param num_threads Number of worker threads to spawn (clamped to matrix size).
  */
-void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int num_threads);
+void gemm_multithreaded(const Matrix &A, const Matrix &B, Matrix &C, int num_threads);
 
 /**
  * @brief Computes matrix multiplication (C = A * B) using cache-aware loop reordering.
@@ -122,7 +122,7 @@ void gemm_multithreaded(const matrix_t *A, const matrix_t *B, matrix_t *C, int n
  * @param C Pointer to the output matrix struct. Must be zero-initialised before call,
  *          since this function accumulates into existing values rather than overwriting.
  */
-void gemm_ikj(const matrix_t *A, const matrix_t *B, matrix_t *C);
+void gemm_ikj(const Matrix &A, const Matrix &B, Matrix &C);
 
 
 #endif
