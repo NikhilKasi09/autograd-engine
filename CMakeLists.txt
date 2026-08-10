@@ -136,11 +136,15 @@ add_executable(gemm_tests tests/cpp/test_gemm.cpp)
 target_link_libraries(gemm_tests PRIVATE gemm_core)
 gemm_apply_flags(gemm_tests)
 
-# Keeps the Catch2 wiring exercised until the harness above moves over to it.
-add_executable(catch2_smoke tests/cpp/test_smoke.cpp)
-target_link_libraries(catch2_smoke PRIVATE Catch2::Catch2WithMain)
-gemm_apply_flags(catch2_smoke)
-add_test(NAME catch2_smoke COMMAND $<TARGET_FILE:catch2_smoke>)
+# Catch2 unit tests. The shape harness joins these once it is converted; for
+# now this is where the Matrix class is driven from.
+add_executable(unit_tests
+    tests/cpp/test_smoke.cpp
+    tests/cpp/test_matrix.cpp
+)
+target_link_libraries(unit_tests PRIVATE gemm_core Catch2::Catch2WithMain)
+gemm_apply_flags(unit_tests)
+add_test(NAME unit_tests COMMAND $<TARGET_FILE:unit_tests>)
 
 # TSan only supports vm.mmap_rnd_bits up to 28 and Ubuntu 24.04 defaults to 32,
 # so without ASLR off the binary dies intermittently with "unexpected memory
