@@ -32,21 +32,6 @@ void gemm_tiled_simd_kernel(size_t M, size_t N, size_t K,
                             const float * GEMM_RESTRICT B, size_t ldb,
                             float * GEMM_RESTRICT C, size_t ldc);
 
-// What one worker thread needs to compute its slice of C. The pointers are
-// pre-offset, so a worker just runs a GEMM of m_rows by N and never needs to
-// know where its slice sits in the full matrix.
-typedef struct {
-    size_t m_rows; // rows of C this worker owns
-    size_t N;
-    size_t K;
-
-    const float *A;   // offset to the worker's first row
-    size_t       lda;
-    const float *B;   // not offset, every worker reads all of B
-    size_t       ldb;
-    float       *C;   // offset to the worker's first row
-    size_t       ldc;
-} thread_args_t;
 
 // Checks A(MxK) * B(KxN) is defined and C is the right shape to hold it.
 // Returns 1 if usable, 0 otherwise, reporting on stderr. Every wrapper calls it.

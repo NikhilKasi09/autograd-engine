@@ -95,7 +95,7 @@ add_library(gemm_core STATIC
     src/gemm_common.cpp
     src/gemm_ikj.cpp
     src/gemm_naive.cpp
-    src/gemm_pthread.cpp
+    src/gemm_threaded.cpp
     src/gemm_simd.cpp
     src/gemm_tiled.cpp
     src/gemm_tiled_simd.cpp
