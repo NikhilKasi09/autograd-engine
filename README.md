@@ -3,7 +3,7 @@
 A deep learning framework built from scratch, in two halves that meet in the
 middle:
 
-1. A GEMM library in C using AVX2 intrinsics, cache tiling and pthreads.
+1. A GEMM library in C++ using AVX2 intrinsics, cache tiling and `std::jthread`.
 2. An autograd engine that records tensor operations and walks the graph
    backwards to get gradients.
 
@@ -14,8 +14,14 @@ No BLAS library is used anywhere. Writing the kernel is the point.
 
 ## Where it is now
 
-The GEMM library is finished and handles arbitrary shapes. The autograd half
-has not been started yet.
+The GEMM library is finished, handles arbitrary shapes, and has been ported
+from C to C++. The autograd half has not been started yet.
+
+The port replaced `posix_memalign`/`free` with an RAII `Matrix` that owns its
+aligned buffer, pthreads with `std::jthread`, the Makefile with CMake, and the
+hand-written test harness with Catch2. It changed no kernel logic: the tiling,
+the intrinsics and the ragged-edge peeling came across untouched, which is
+what makes the performance claim below checkable.
 
 Six kernels, kept as a performance ladder. Slower ones are not deleted when a
 faster one lands, because the progression is the interesting part.
@@ -24,6 +30,12 @@ faster one lands, because the progression is the interesting part.
 
 GFLOP/s, float32, gcc 13.3 with `-O3 -mavx2 -mfma`, on a Ryzen AI 9 HX 370
 (12 cores, 24 threads). Higher is better.
+
+These were measured on the C build and are unchanged by the C++ port. That is
+not an assumption: the two binaries were run interleaved, seven runs each,
+and the ranges overlap on all 36 shape/kernel pairs. Run-to-run noise on this
+machine reaches 20%, so a single before/after pair would have shown nothing
+either way.
 
 | Kernel | 256³ | 1024³ | 1023³ |
 |---|---|---|---|
@@ -54,6 +66,9 @@ changes, only the number.
 
 Threading is only worth it above about 512. At 256 the 8 threads cost more to
 start than the work they save.
+
+The multithreaded row is at 8 threads. `./build/gemm_benchmark` now defaults
+to every hardware thread, so pass `8` to reproduce that column exactly.
 
 ## Compared to OpenBLAS
 
@@ -111,16 +126,35 @@ obvious next optimisation.
 ## Building
 
 ```bash
-make                # build the benchmark
-./gemm_benchmark    # run the ladder
-make test           # correctness tests
-make asan           # AddressSanitizer + UBSan build, then tests
-make tsan           # ThreadSanitizer build, then tests
+python3 -m venv .venv && .venv/bin/pip install pybind11 numpy pytest
+
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+
+./build/gemm_benchmark        # the ladder, all hardware threads
+./build/gemm_benchmark 8      # ...or a specific thread count
+./build/gemm_tests            # correctness, 1085 assertions
+ctest --test-dir build        # same, through ctest
+.venv/bin/pytest tests/python # bindings and the NumPy cross-check
 ```
+
+Sanitisers get their own build directories, since the flags have to reach the
+link line as well as the compile line:
+
+```bash
+cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug -DGEMM_SANITIZE=address
+cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DGEMM_SANITIZE=thread
+cmake --build build-asan -j && ctest --test-dir build-asan
+cmake --build build-tsan -j && ctest --test-dir build-tsan
+```
+
+TSan needs ASLR off on Ubuntu 24.04, which defaults `vm.mmap_rnd_bits` to 32
+where TSan supports 28. CMake wraps the test in `setarch -R` automatically;
+run the binary directly and it dies with "unexpected memory mapping".
 
 ## Testing
 
-`make test` runs every kernel against an independent reference over 21 shapes,
+`./build/gemm_tests` runs every kernel against an independent reference over 21 shapes,
 chosen so that each dimension independently crosses the vector width, the
 register block and the tile boundary. That includes the awkward ones: `1x1x1`,
 `17x31x13`, `1x512x1`, `129x130x131`.
@@ -135,8 +169,19 @@ Two things it does that a simpler harness would not:
   identical. The backward pass will accumulate into C, so that distinction has
   to be tested now.
 
-`./gemm_tests --fuzz` adds 300 random shapes, giving 6430 cases in about a
-second. `make asan` and `make tsan` run the same tests instrumented.
+`./build/gemm_tests "[.fuzz]"` adds 300 random shapes, giving 6600 assertions.
+It is hidden behind a dot tag so the default run stays fast.
+
+Two further checks the harness cannot make on its own:
+
+- **A mutation test.** Swapping an `ldc` for an `lda` in one kernel passes
+  every square shape and is caught only at `64x96x1`. Confirming the harness
+  fails on a deliberate bug is the cheapest evidence it is not vacuously
+  passing.
+- **NumPy.** The reference implementation and the kernels were written by the
+  same person on the same assumptions, so agreement between them is weaker
+  evidence than it looks. `pytest tests/python` checks `np.allclose` against
+  `a @ b` over 12 shapes and all six kernels.
 
 Worth knowing: ASan cannot catch a column overrun on any row except the last,
 because it lands in the next row of the same allocation. The numeric comparison
@@ -145,7 +190,7 @@ is what actually catches those.
 ## Roadmap
 
 - [x] Generalise the GEMM library to arbitrary M, N and K
-- [ ] Port to C++, CMake, Catch2
+- [x] Port to C++, CMake, Catch2
 - [ ] Tensor type: shape, strides, contiguous storage
 - [ ] pybind11 bindings
 - [ ] Autograd graph and `backward()`
@@ -159,10 +204,9 @@ performance story, so it may jump the queue.
 
 ## Origins
 
-The original square-only C kernels came out of a group project at Imperial,
-with contributions from Jay Shah and Seyaan Budhkar as well as me. The history
-of that work is preserved in this repo's commits.
+The original square-only C kernels came out of a group project at Imperial.
+The history of that work is preserved in this repo's commits.
 
 Everything since then is mine: generalising all six kernels to arbitrary
-shapes, the leading-dimension rework, the test harness, and the benchmarking
-above.
+shapes, the leading-dimension rework, the test harness, the benchmarking
+above, and the port to C++.
