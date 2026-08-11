@@ -6,10 +6,17 @@
 #include "benchmark.hpp"
 #include "validate.hpp"
 #include <stdexcept>
+#include <thread>
+
+// run_benchmark takes a plain function pointer, so the thread count cannot be
+// captured and has to live here. Defaults to every hardware thread; override
+// with a single argument, e.g. ./gemm_benchmark 8.
+namespace {
+int bench_threads = 8;
+}
 
 void gemm_multithreaded_wrapper(const Matrix &A, const Matrix &B, Matrix &C) {
-    // Spawning 8 threads for the benchmark run
-    gemm_multithreaded(A, B, C, 8);
+    gemm_multithreaded(A, B, C, bench_threads);
 }
 
 // Struct to hold kernel metadata for our testing loop
@@ -24,7 +31,23 @@ typedef struct {
     const char *note;
 } bench_shape_t;
 
-int main(void) {
+int main(int argc, char **argv) {
+    // hardware_concurrency reports 0 when it cannot tell, so fall back rather
+    // than asking gemm_multithreaded for zero threads.
+    const unsigned detected = std::thread::hardware_concurrency();
+    bench_threads = (detected > 0) ? (int)detected : 8;
+
+    if (argc > 1) {
+        const int requested = atoi(argv[1]);
+        if (requested <= 0) {
+            fprintf(stderr, "usage: %s [num_threads]\n", argv[0]);
+            return 1;
+        }
+        bench_threads = requested;
+    }
+
+    printf("Multithreaded rung uses %d threads\n\n", bench_threads);
+
     bench_shape_t shapes[] = {
         { 256,  256,  256, "square"},
         { 512,  512,  512, "square"},
