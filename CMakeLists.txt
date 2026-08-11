@@ -84,6 +84,10 @@ find_package(pybind11 CONFIG REQUIRED)
 pybind11_add_module(_core bindings/bindings.cpp)
 gemm_apply_flags(_core)
 
+# The bindings call the kernels, so they need the library and, through its
+# PUBLIC include directory, the headers.
+target_link_libraries(_core PRIVATE gemm_core)
+
 # Drop the module next to the Python sources so pytest imports it without an
 # install step or a PYTHONPATH dance.
 set_target_properties(_core PROPERTIES
@@ -109,6 +113,15 @@ add_library(gemm_core STATIC
 )
 target_include_directories(gemm_core PUBLIC include)
 gemm_apply_flags(gemm_core)
+
+# _core is a shared module, and a shared object cannot link a static archive
+# built without position-independent code.
+#
+# Measured rather than assumed: an interleaved A/B of five runs each, PIC
+# against not, overlaps on all 36 shape/kernel pairs. The kernels take
+# everything through registers and touch globals only on error paths, so the
+# GOT indirection never lands in a hot loop.
+set_target_properties(gemm_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # Replaces the Makefile's -pthread. Threads::Threads carries the flag to every
 # consumer, so the linker gets it too.
