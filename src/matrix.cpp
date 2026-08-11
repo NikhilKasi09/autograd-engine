@@ -9,11 +9,8 @@
 
 
 // Matrix - RAII replacement for matrix_t.
+// AlignedDeleter's body moved to aligned.hpp, where Tensor can share it.
 
-
-void AlignedDeleter::operator()(float *p) const noexcept { // allows you to use the AlignedDeleter class as a function
-    ::operator delete(p, std::align_val_t{ALIGNMENT_REQ});
-}
 
 Matrix::Matrix(std::size_t rows, std::size_t cols)
     :  rows_(rows), cols_(cols), stride_(cols)

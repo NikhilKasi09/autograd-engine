@@ -3,9 +3,8 @@
 
 #include <stddef.h>
 
-// Alignment for AVX2 registers. Applies to the base pointer only, not to
-// where any individual row starts.
-#define ALIGNMENT_REQ 32
+// ALIGNMENT_REQ and AlignedDeleter, shared with Tensor.
+#include "aligned.hpp"
 
 
 // Matrix - the RAII replacement for matrix_t.
@@ -14,14 +13,6 @@
 #include <cstddef>
 #include <memory>
 #include <type_traits>
-
-// Releases a block obtained from the matching aligned operator new. Aligned
-// allocation and deallocation must be paired: handing an over-aligned pointer
-// to plain operator delete is undefined behaviour, which is exactly the bug
-// this type exists to make unrepresentable.
-struct AlignedDeleter {
-    void operator()(float *p) const noexcept;
-};
 
 class Matrix {
 public:
@@ -91,11 +82,5 @@ static_assert(std::is_nothrow_move_constructible_v<Matrix>,
               "Matrix must be nothrow-movable so containers can relocate it");
 static_assert(std::is_nothrow_move_assignable_v<Matrix>,
               "Matrix must be nothrow-move-assignable");
-
-// The kernels read 8 floats per AVX2 vector; ALIGNMENT_REQ is 32 bytes for
-// that reason and not by coincidence.
-static_assert(sizeof(float) == 4, "AVX2 kernels assume 4-byte floats");
-static_assert(ALIGNMENT_REQ == 8 * sizeof(float),
-              "ALIGNMENT_REQ should be one AVX2 vector wide");
 
 #endif
