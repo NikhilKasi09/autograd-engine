@@ -1,66 +1,63 @@
-/*
- Correctness harness for the GEMM kernel ladder.
+// Shape-driven correctness harness for the GEMM ladder.
+//
+// Three properties are load-bearing and survive from the hand-written version:
+//
+//   1. Every kernel is compared against an independent dense reference, naive
+//      included, rather than using naive as the oracle. A wrong reference would
+//      otherwise silently bless every kernel at once.
+//   2. Every case runs twice, with C zeroed and with C prefilled. The contract
+//      is C += A*B; zeroing C before every call makes = and += indistinguishable.
+//   3. Restriction bitmasks let a half-finished kernel report SKIP with a reason
+//      instead of failing the build. All masks are empty now; the mechanism
+//      stays for the next kernel that lands incrementally.
+//
+// Filtering is Catch2's now: `gemm_tests "[gemm]"` for the table, and the fuzz
+// run is hidden behind a dot tag - `gemm_tests "[.fuzz]"` - so it costs nothing
+// unless asked for.
 
- Every kernel is checked against reference_gemm() below, a plain triple loop
- with no leading-dimension arithmetic. gemm_naive is tested like everything
- else rather than used as the source of truth, so a bug in it cannot bless the
- other five.
-
- Each registry entry carries a mask of the shapes its kernel cannot handle yet,
- and a violated restriction prints SKIP rather than FAIL. Every mask is empty
- now that phase 1 is done, so the SKIP count should stay at zero.
-
- Every case runs twice, once with C zeroed and once with C prefilled. Zeroing C
- before every call makes 'C = sum' and 'C += sum' look identical, and the
- backward pass accumulates into C.
-
- Usage:
-   ./gemm_tests                 run the shape table
-   ./gemm_tests tiled_simd      run only kernels whose name contains this
-   ./gemm_tests --fuzz          also run randomised sizes
-*/
-
-#include <math.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-#include "benchmark.hpp" /* gemm_kernel_ptr */
 #include "gemm.hpp"
 #include "matrix.hpp"
 
-// Printed on every run so that a failure can be reproduced exactly
-#define SEED 0xC0FFEE
+#include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
+#include <catch2/generators/catch_generators_range.hpp>
 
-// Mixed tolerance: diff > ATOL + RTOL * |expected|. A flat absolute tolerance
-// breaks down at large K, where results near 256 have a float ULP of 1.5e-5
-// and the SIMD kernels legitimately differ because FMA skips the intermediate
-// rounding and tiling reorders the k-summation. max_abs_err is printed per
-// case so the real margin is visible.
-#define ATOL 1e-5f
-#define RTOL 1e-5f
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <ostream>
+#include <vector>
 
-// Randomised mode settings (--fuzz)
-#define FUZZ_ITERS   300
-#define FUZZ_MAX_DIM 80
+namespace {
+
+// Fixed seed so a failure is reproducible. Inputs are reseeded per shape from
+// the dimensions, so one shape's data never depends on what ran before it.
+constexpr unsigned SEED = 0xC0FFEE;
+
+// Tolerance scaled by the value. A flat 1e-4 breaks down at large K: results
+// near 256 have a float ULP of 3e-5, and FMA and tiling reorder the summation
+// so the kernels legitimately differ in the last bits.
+constexpr float ATOL = 1e-5f;
+constexpr float RTOL = 1e-5f;
+
+constexpr int FUZZ_ITERS   = 300;
+constexpr int FUZZ_MAX_DIM = 80;
 
 /* ------------------------------------------------------------------------ */
 /* Shape restrictions                                                        */
 /* ------------------------------------------------------------------------ */
 
-typedef enum {
+enum KernelRestrict : unsigned {
     RESTRICT_SQUARE   = 1u << 0, /* requires M == N == K                     */
     RESTRICT_N_MULT8  = 1u << 1, /* requires N % 8 == 0 (vector width)       */
     RESTRICT_N_MIN16  = 1u << 2, /* requires N >= 16    (j-underflow, bug 2) */
     RESTRICT_M_MIN4   = 1u << 3, /* requires M >= 4     (i-underflow, bug 2) */
     RESTRICT_MT_4ROWS = 1u << 4  /* requires M/nthreads >= 4        (bug 1)  */
-} kernel_restrict_t;
+};
 
-// Returns the name of the first violated restriction, or NULL if this kernel
+// Returns the name of the first violated restriction, or nullptr if this kernel
 // can legally be run on this shape
-static const char *restriction_violated(unsigned mask, size_t M, size_t N, size_t K,
-                                        int nthreads) {
+const char *restriction_violated(unsigned mask, size_t M, size_t N, size_t K, int nthreads) {
     if ((mask & RESTRICT_SQUARE) && !(M == N && N == K)) {
         return "SQUARE";
     }
@@ -83,28 +80,7 @@ static const char *restriction_violated(unsigned mask, size_t M, size_t N, size_
             return "MT_4ROWS";
         }
     }
-    return NULL;
-}
-
-/* ------------------------------------------------------------------------ */
-/* Matrix access helpers                                                     */
-/* ------------------------------------------------------------------------ */
-
-// Every access to a Matrix goes through these three, so a storage change is a
-// small edit here instead of a rewrite of the file. mat_new returns by value:
-// the constructor throws rather than returning null, so the callers' old
-// alloc-failure branches are gone.
-static Matrix mat_new(size_t rows, size_t cols) {
-    return Matrix(rows, cols);
-}
-
-static size_t mat_stride(const Matrix &m) {
-    return m.stride();
-}
-
-// Floats in the whole allocation, used when scrubbing C
-static size_t mat_alloc_floats(const Matrix &m) {
-    return m.rows() * m.stride();
+    return nullptr;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -117,8 +93,7 @@ static size_t mat_alloc_floats(const Matrix &m) {
 // The accumulator is a double. This is what every kernel is judged against, so
 // it should carry less rounding error than they do, not the same amount in a
 // different order.
-static void reference_gemm(size_t M, size_t N, size_t K, const float *A, const float *B,
-                           float *C) {
+void reference_gemm(size_t M, size_t N, size_t K, const float *A, const float *B, float *C) {
     for (size_t i = 0; i < M; i++) {
         for (size_t j = 0; j < N; j++) {
             double acc = (double)C[i * N + j];
@@ -131,162 +106,64 @@ static void reference_gemm(size_t M, size_t N, size_t K, const float *A, const f
 }
 
 /* ------------------------------------------------------------------------ */
-/* Fill and compare helpers                                                  */
+/* Test data                                                                 */
 /* ------------------------------------------------------------------------ */
 
-// Inputs from [0.5, 1.5) rather than [0, 1), so no expected value can drift
-// near zero and hide a missing region. A region no path wrote stays 0 and one
-// two paths wrote is roughly 2x; both need non-zero expected values to show up.
-static void fill_random(float *buf, size_t n) {
-    for (size_t i = 0; i < n; i++) {
-        buf[i] = 0.5f + ((float)rand() / (float)RAND_MAX);
-    }
-}
-
-// Prefill pattern, bounded to [1.0, 2.5]. The bound matters: an unbounded ramp
-// hits ~8192 at 128x256, which dwarfs the ~512 product term and waters the
-// relative tolerance down until the accumulate check stops discriminating.
-static float prefill_value(size_t i, size_t j, size_t N) {
-    return 1.0f + (float)((i * N + j) % 7u) * 0.25f;
-}
-
-typedef enum { PREFILL_ZERO = 0, PREFILL_PATTERN = 1 } prefill_mode_t;
-
-static const char *prefill_name(prefill_mode_t mode) {
-    return (mode == PREFILL_ZERO) ? "zero" : "accum";
-}
-
-// Builds the dense M*N buffer used to seed both C and the reference
-static void make_prefill(float *buf, size_t M, size_t N, prefill_mode_t mode) {
-    for (size_t i = 0; i < M; i++) {
-        for (size_t j = 0; j < N; j++) {
-            buf[i * N + j] = (mode == PREFILL_ZERO) ? 0.0f : prefill_value(i, j, N);
-        }
-    }
-}
-
-// Copies a dense MxN buffer into a Matrix, honouring the matrix's stride
-static void scatter_to_matrix(Matrix &dst, const float *src, size_t rows, size_t cols) {
-    const size_t stride = mat_stride(dst);
-
-    // Scrub the whole allocation first so nothing carries over between runs
-    memset(dst.data(), 0, mat_alloc_floats(dst) * sizeof(float));
-
-    for (size_t i = 0; i < rows; i++) {
-        memcpy(&dst.data()[i * stride], &src[i * cols], cols * sizeof(float));
-    }
-}
-
-typedef struct {
-    bool   ok;
-    double max_abs_err;
-    double max_rel_err;
-    size_t bad_i, bad_j;
-    float  expected, actual;
-} compare_result_t;
-
-static compare_result_t compare_to_reference(const float *ref, const Matrix &C, size_t M,
-                                             size_t N) {
-    compare_result_t r;
-    r.ok          = true;
-    r.max_abs_err = 0.0;
-    r.max_rel_err = 0.0;
-    r.bad_i = r.bad_j = 0;
-    r.expected = r.actual = 0.0f;
-
-    const size_t stride = mat_stride(C);
-
-    for (size_t i = 0; i < M; i++) {
-        for (size_t j = 0; j < N; j++) {
-            const float expected = ref[i * N + j];
-            const float actual   = C.data()[i * stride + j];
-            const double diff    = fabs((double)expected - (double)actual);
-            const double rel     = (expected != 0.0f) ? diff / fabs((double)expected) : diff;
-
-            if (diff > r.max_abs_err) {
-                r.max_abs_err = diff;
-            }
-            if (rel > r.max_rel_err) {
-                r.max_rel_err = rel;
-            }
-
-            if (diff > (double)ATOL + (double)RTOL * fabs((double)expected)) {
-                // Keep the first failure only, but let the maxima keep updating
-                if (r.ok) {
-                    r.bad_i    = i;
-                    r.bad_j    = j;
-                    r.expected = expected;
-                    r.actual   = actual;
-                }
-                r.ok = false;
-            }
-        }
-    }
-    return r;
-}
-
-/* ------------------------------------------------------------------------ */
-/* Kernel registry                                                           */
-/* ------------------------------------------------------------------------ */
-
-// gemm_multithreaded takes a thread count, so it needs one gemm_kernel_ptr
-// wrapper per count under test. Counts that hand a worker fewer than 4 rows
-// are the path that is broken today (RESTRICT_MT_4ROWS).
-static void mt1(const Matrix &A, const Matrix &B, Matrix &C) {
-    gemm_multithreaded(A, B, C, 1);
-}
-static void mt2(const Matrix &A, const Matrix &B, Matrix &C) {
-    gemm_multithreaded(A, B, C, 2);
-}
-static void mt3(const Matrix &A, const Matrix &B, Matrix &C) {
-    gemm_multithreaded(A, B, C, 3);
-}
-static void mt8(const Matrix &A, const Matrix &B, Matrix &C) {
-    gemm_multithreaded(A, B, C, 8);
-}
-// 64 threads is well past the row count of most shapes in the table, so this
-// is the one that exercises the clamp
-static void mt64(const Matrix &A, const Matrix &B, Matrix &C) {
-    gemm_multithreaded(A, B, C, 64);
-}
-
-typedef struct {
-    const char      *name;
-    gemm_kernel_ptr  func;
-    unsigned         restrictions;
-    int              nthreads; /* 0 for the single-threaded kernels */
-} kernel_entry_t;
-
-// Every mask is empty now that all six kernels handle arbitrary shapes. The
-// enum and the checks stay because they are how a half-finished kernel gets
-// tested without failing the build, which is worth having for the next one.
-static const kernel_entry_t kernels[] = {
-    {"naive",      gemm_naive,      0,                                                      0},
-    {"ikj",        gemm_ikj,        0,                                                      0},
-    {"tiled",      gemm_tiled,      0,                                                      0},
-    {"avx2",       gemm_avx2,       0,                                                      0},
-    {"tiled_simd", gemm_tiled_simd, 0,                                                      0},
-    {"mt1",        mt1,             0,                                                      1},
-    {"mt2",        mt2,             0,                                                      2},
-    {"mt3",        mt3,             0,                                                      3},
-    {"mt8",        mt8,             0,                                                      8},
-    {"mt64",       mt64,            0,                                                     64}
-};
-static const size_t num_kernels = sizeof(kernels) / sizeof(kernels[0]);
-
-/* ------------------------------------------------------------------------ */
-/* Shape table                                                               */
-/* ------------------------------------------------------------------------ */
-
-typedef struct {
+struct Shape {
     size_t M, N, K;
-} shape_t;
+};
+
+// Catch2 prints generated values in the subcase name, so these three streaming
+// operators are what makes a failure say "17x31x13 tiled_simd accum" instead of
+// three copies of {?}.
+std::ostream &operator<<(std::ostream &os, const Shape &s) {
+    return os << s.M << "x" << s.N << "x" << s.K;
+}
+
+enum class Prefill { Zero, Pattern };
+
+std::ostream &operator<<(std::ostream &os, Prefill p) {
+    return os << (p == Prefill::Zero ? "zero" : "accum");
+}
+
+// Declared here rather than pulling in benchmark.hpp for its gemm_kernel_ptr:
+// a correctness harness has no business depending on the timing header.
+using GemmFn = void (*)(const Matrix &, const Matrix &, Matrix &);
+
+struct KernelEntry {
+    const char *name;
+    GemmFn      func;
+    unsigned    restrictions;
+    int         nthreads; /* 0 for the single-threaded kernels */
+};
+
+std::ostream &operator<<(std::ostream &os, const KernelEntry &k) {
+    return os << k.name;
+}
+
+// gemm_multithreaded takes a thread count, so it needs one gemm_kernel_ptr per
+// count under test. Captureless lambdas convert to a plain function pointer,
+// which is what retired the five named mt* shims.
+const KernelEntry kernels[] = {
+    {"naive",      gemm_naive,      0,  0},
+    {"ikj",        gemm_ikj,        0,  0},
+    {"tiled",      gemm_tiled,      0,  0},
+    {"avx2",       gemm_avx2,       0,  0},
+    {"tiled_simd", gemm_tiled_simd, 0,  0},
+    {"mt1",  [](const Matrix &A, const Matrix &B, Matrix &C) { gemm_multithreaded(A, B, C, 1); },  0,  1},
+    {"mt2",  [](const Matrix &A, const Matrix &B, Matrix &C) { gemm_multithreaded(A, B, C, 2); },  0,  2},
+    {"mt3",  [](const Matrix &A, const Matrix &B, Matrix &C) { gemm_multithreaded(A, B, C, 3); },  0,  3},
+    {"mt8",  [](const Matrix &A, const Matrix &B, Matrix &C) { gemm_multithreaded(A, B, C, 8); },  0,  8},
+    // 64 threads is well past the row count of most shapes in the table, so
+    // this is the one that exercises the clamp
+    {"mt64", [](const Matrix &A, const Matrix &B, Matrix &C) { gemm_multithreaded(A, B, C, 64); }, 0, 64},
+};
 
 // Each dimension independently crosses the vector width (8), the register
 // block (4 and 16) and the tile boundary (64). A bug that only appears when
 // two dimensions are ragged at once is the main risk, so the table has to
 // cross them independently rather than scale one number.
-static const shape_t shapes[] = {
+const Shape shapes[] = {
     {  1,   1,   1}, /* degenerate                                */
     {  1, 512,   1}, /* single row, long N                        */
     {  1, 128,  64}, /* M below the register block                */
@@ -309,149 +186,169 @@ static const shape_t shapes[] = {
     {128, 256, 512}, /* non-square, tile aligned                  */
     {256, 256, 256}  /* square, tile aligned                      */
 };
-static const size_t num_shapes = sizeof(shapes) / sizeof(shapes[0]);
 
 /* ------------------------------------------------------------------------ */
-/* Test driver                                                               */
+/* Fill and compare helpers                                                  */
 /* ------------------------------------------------------------------------ */
-
-typedef struct {
-    size_t passed;
-    size_t failed;
-    size_t skipped;
-    bool   quiet; /* fuzz mode prints failures only */
-} tally_t;
 
 // Seed derived from the dimensions, so one shape's inputs do not depend on
-// which shapes ran before it or on whether --fuzz was passed
-static void seed_for_shape(size_t M, size_t N, size_t K) {
-    srand((unsigned)(SEED ^ (M * 73856093u) ^ (N * 19349663u) ^ (K * 83492791u)));
+// which shapes ran before it or on whether the fuzz run is what invoked it
+void seed_for_shape(const Shape &s) {
+    srand((unsigned)(SEED ^ (s.M * 73856093u) ^ (s.N * 19349663u) ^ (s.K * 83492791u)));
 }
 
-// Runs one shape against every registered kernel in both prefill modes and
-// returns the number of failures
-static size_t run_shape(shape_t s, const char *filter, tally_t *tally) {
-    const size_t M = s.M, N = s.N, K = s.K;
-    size_t failures = 0;
-
-    float *a_buf   = static_cast<float*>(malloc(M * K * sizeof(float)));
-    float *b_buf   = static_cast<float*>(malloc(K * N * sizeof(float)));
-    float *c_seed  = static_cast<float*>(malloc(M * N * sizeof(float))); /* prefill pattern */
-    float *ref     = static_cast<float*>(malloc(M * N * sizeof(float)));
-
-    if (!a_buf || !b_buf || !c_seed || !ref) {
-        fprintf(stderr, "FATAL: harness allocation failed at %zux%zux%zu\n", M, N, K);
-        exit(2);
+// Inputs from [0.5, 1.5) rather than [0, 1), so no expected value can drift
+// near zero and hide a missing region. A region no path wrote stays 0 and one
+// two paths wrote is roughly 2x; both need non-zero expected values to show up.
+void fill_random(std::vector<float> &buf) {
+    for (float &v : buf) {
+        v = 0.5f + ((float)rand() / (float)RAND_MAX);
     }
-
-    // Matrix throws on a failed allocation rather than returning null, so the
-    // old alloc-failed SKIP path is unreachable and has gone.
-    Matrix A = mat_new(M, K);
-    Matrix B = mat_new(K, N);
-
-    seed_for_shape(M, N, K);
-    fill_random(a_buf, M * K);
-    fill_random(b_buf, K * N);
-    scatter_to_matrix(A, a_buf, M, K);
-    scatter_to_matrix(B, b_buf, K, N);
-
-    for (int mode_i = 0; mode_i < 2; mode_i++) {
-        const prefill_mode_t mode = (prefill_mode_t)mode_i;
-
-        make_prefill(c_seed, M, N, mode);
-
-        // The reference accumulates too, so seeding it with the same pattern
-        // keeps the accumulate check to one code path instead of two
-        memcpy(ref, c_seed, M * N * sizeof(float));
-        reference_gemm(M, N, K, a_buf, b_buf, ref);
-
-        // Latent bug 6: a wrapper that rejects its input leaves C untouched, so
-        // comparing zero against zero would report PASS. Check the reference is
-        // actually non-trivial before trusting anything compared against it.
-        double checksum = 0.0;
-        for (size_t idx = 0; idx < M * N; idx++) {
-            checksum += fabs((double)ref[idx]);
-        }
-        if (!(checksum > 0.0)) {
-            printf("FAIL %-11s %4zux%4zux%4zu [%-5s] reference checksum is zero\n",
-                   "reference", M, N, K, prefill_name(mode));
-            failures++;
-            tally->failed++;
-            continue;
-        }
-
-        for (size_t k = 0; k < num_kernels; k++) {
-            const kernel_entry_t *ke = &kernels[k];
-
-            if (filter && !strstr(ke->name, filter)) {
-                continue;
-            }
-
-            const char *why =
-                restriction_violated(ke->restrictions, M, N, K, ke->nthreads);
-            if (why) {
-                if (!tally->quiet) {
-                    printf("SKIP %-11s %4zux%4zux%4zu [%-5s] %s\n", ke->name, M, N, K,
-                           prefill_name(mode), why);
-                }
-                tally->skipped++;
-                continue;
-            }
-
-            Matrix C = mat_new(M, N);
-            scatter_to_matrix(C, c_seed, M, N);
-
-            ke->func(A, B, C);
-
-            const compare_result_t r = compare_to_reference(ref, C, M, N);
-
-            if (r.ok) {
-                if (!tally->quiet) {
-                    printf("PASS %-11s %4zux%4zux%4zu [%-5s] max_abs_err=%.2e rel=%.2e\n",
-                           ke->name, M, N, K, prefill_name(mode), r.max_abs_err,
-                           r.max_rel_err);
-                }
-                tally->passed++;
-            } else {
-                printf("FAIL %-11s %4zux%4zux%4zu [%-5s] at [%zu][%zu] "
-                       "expected=%.6f actual=%.6f max_abs_err=%.2e rel=%.2e\n",
-                       ke->name, M, N, K, prefill_name(mode), r.bad_i, r.bad_j,
-                       (double)r.expected, (double)r.actual, r.max_abs_err, r.max_rel_err);
-                failures++;
-                tally->failed++;
-            }
-
-        }
-    }
-
-    free(a_buf);
-    free(b_buf);
-    free(c_seed);
-    free(ref);
-
-    return failures;
 }
 
-// Randomised shapes against the reference. A fixed table always misses some
-// combination of edges, and each iteration is at most 2*80^3 = 1.0 MFLOP, so
-// the whole run costs about a second. M, N and K are drawn independently.
-static size_t run_fuzz(const char *filter, tally_t *tally) {
-    size_t failures = 0;
-
-    printf("\n--- fuzz: %d random shapes with M, N, K in [1,%d] ---\n", FUZZ_ITERS,
-           FUZZ_MAX_DIM);
-
-    srand((unsigned)SEED);
-    for (int it = 0; it < FUZZ_ITERS; it++) {
-        shape_t s;
-        s.M = (size_t)(rand() % FUZZ_MAX_DIM) + 1u;
-        s.N = (size_t)(rand() % FUZZ_MAX_DIM) + 1u;
-        s.K = (size_t)(rand() % FUZZ_MAX_DIM) + 1u;
-        // run_shape reseeds from the dimensions, so a fuzz failure can be
-        // reproduced from the shape alone
-        failures += run_shape(s, filter, tally);
+// Prefill pattern, bounded to [1.0, 2.5]. The bound matters: an unbounded ramp
+// hits ~8192 at 128x256, which dwarfs the ~512 product term and waters the
+// relative tolerance down until the accumulate check stops discriminating.
+void make_prefill(std::vector<float> &buf, size_t M, size_t N, Prefill mode) {
+    for (size_t i = 0; i < M; i++) {
+        for (size_t j = 0; j < N; j++) {
+            buf[i * N + j] =
+                (mode == Prefill::Zero) ? 0.0f : 1.0f + (float)((i * N + j) % 7u) * 0.25f;
+        }
     }
-    return failures;
+}
+
+// Copies a dense MxN buffer into a Matrix, honouring the matrix's stride
+void scatter_to_matrix(Matrix &dst, const float *src, size_t rows, size_t cols) {
+    const size_t stride = dst.stride();
+
+    // Scrub the whole allocation first so nothing carries over between runs
+    memset(dst.data(), 0, dst.rows() * stride * sizeof(float));
+
+    for (size_t i = 0; i < rows; i++) {
+        memcpy(&dst.data()[i * stride], &src[i * cols], cols * sizeof(float));
+    }
+}
+
+struct CompareResult {
+    bool   ok;
+    double max_abs_err;
+    double max_rel_err;
+    size_t bad_i, bad_j;
+    float  expected, actual;
+};
+
+CompareResult compare_to_reference(const std::vector<float> &ref, const Matrix &C, size_t M,
+                                   size_t N) {
+    CompareResult r{true, 0.0, 0.0, 0, 0, 0.0f, 0.0f};
+    const size_t  stride = C.stride();
+
+    for (size_t i = 0; i < M; i++) {
+        for (size_t j = 0; j < N; j++) {
+            const float  expected = ref[i * N + j];
+            const float  actual   = C.data()[i * stride + j];
+            const double diff     = std::fabs((double)expected - (double)actual);
+            const double rel      = (expected != 0.0f) ? diff / std::fabs((double)expected) : diff;
+
+            if (diff > r.max_abs_err) {
+                r.max_abs_err = diff;
+            }
+            if (rel > r.max_rel_err) {
+                r.max_rel_err = rel;
+            }
+
+            if (diff > (double)ATOL + (double)RTOL * std::fabs((double)expected)) {
+                // Keep the first failure only, but let the maxima keep updating
+                if (r.ok) {
+                    r.bad_i    = i;
+                    r.bad_j    = j;
+                    r.expected = expected;
+                    r.actual   = actual;
+                }
+                r.ok = false;
+            }
+        }
+    }
+    return r;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Fixture                                                                   */
+/* ------------------------------------------------------------------------ */
+
+// Everything one (shape, prefill) pair needs: the two inputs, the C seed, and
+// the reference answer for that seed. Built once and reused across kernels in
+// the fuzz loop, where recomputing the reference ten times over would dominate.
+struct Fixture {
+    std::vector<float> a, b, c_seed, ref;
+};
+
+Fixture build_fixture(const Shape &s, Prefill mode) {
+    Fixture f;
+    f.a.resize(s.M * s.K);
+    f.b.resize(s.K * s.N);
+    f.c_seed.resize(s.M * s.N);
+
+    seed_for_shape(s);
+    fill_random(f.a);
+    fill_random(f.b);
+    make_prefill(f.c_seed, s.M, s.N, mode);
+
+    f.ref = f.c_seed;
+    reference_gemm(s.M, s.N, s.K, f.a.data(), f.b.data(), f.ref.data());
+    return f;
+}
+
+// A wrapper that rejects its input leaves C untouched, so comparing zero
+// against zero would report a pass. Insisting the reference is not identically
+// zero is what stops that being silent.
+double reference_magnitude(const std::vector<float> &ref) {
+    double sum = 0.0;
+    for (float v : ref) {
+        sum += std::fabs((double)v);
+    }
+    return sum;
+}
+
+void check_kernel(const Shape &s, const KernelEntry &ke, Prefill mode, const Fixture &f) {
+    Matrix A(s.M, s.K), B(s.K, s.N), C(s.M, s.N);
+    scatter_to_matrix(A, f.a.data(), s.M, s.K);
+    scatter_to_matrix(B, f.b.data(), s.K, s.N);
+    scatter_to_matrix(C, f.c_seed.data(), s.M, s.N);
+
+    ke.func(A, B, C);
+
+    const CompareResult r = compare_to_reference(f.ref, C, s.M, s.N);
+
+    INFO("shape " << s << "  kernel " << ke.name << "  prefill " << mode);
+    INFO("max_abs_err=" << r.max_abs_err << "  max_rel_err=" << r.max_rel_err);
+    if (!r.ok) {
+        INFO("first mismatch at [" << r.bad_i << "][" << r.bad_j << "]  expected=" << r.expected
+                                   << "  actual=" << r.actual);
+    }
+    CHECK(r.ok);
+}
+
+} // namespace
+
+/* ------------------------------------------------------------------------ */
+/* Test cases                                                                */
+/* ------------------------------------------------------------------------ */
+
+TEST_CASE("gemm kernels match an independent reference", "[gemm]") {
+    const auto s    = GENERATE(from_range(shapes));
+    const auto ke   = GENERATE(from_range(kernels));
+    const auto mode = GENERATE(Prefill::Zero, Prefill::Pattern);
+
+    const char *why = restriction_violated(ke.restrictions, s.M, s.N, s.K, ke.nthreads);
+    if (why != nullptr) {
+        SKIP(ke.name << " restricted on " << s << ": " << why);
+    }
+
+    const Fixture f = build_fixture(s, mode);
+    REQUIRE(reference_magnitude(f.ref) > 0.0);
+
+    check_kernel(s, ke, mode, f);
 }
 
 // One case checked against values worked out by hand, so the reference itself
@@ -462,110 +359,65 @@ static size_t run_fuzz(const char *filter, tally_t *tally) {
 //       [ 9 10 11 12 ]          [ 5  6 ]          [ 178  220 ]
 //                               [ 7  8 ]
 //
-// Non-square in all three dimensions, and every value is exactly representable
-// in a float, so this compares exactly instead of with a tolerance.
-static size_t run_known_values(const char *filter, tally_t *tally) {
-    static const float a_vals[12] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
-    static const float b_vals[8]  = {1, 2, 3, 4, 5, 6, 7, 8};
-    static const float expected[6] = {50, 60, 114, 140, 178, 220};
+// Every value is exactly representable, so this compares with == rather than a
+// tolerance.
+TEST_CASE("gemm kernels reproduce a hand-computed product exactly", "[gemm][exact]") {
+    const auto ke = GENERATE(from_range(kernels));
 
-    const size_t M = 3, N = 2, K = 4;
-    size_t failures = 0;
+    constexpr size_t M = 3, N = 2, K = 4;
 
-    printf("\n--- hand-checked 3x2x4 ---\n");
+    static const float a_vals[M * K] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    static const float b_vals[K * N] = {1, 2, 3, 4, 5, 6, 7, 8};
+    static const float expected[M * N] = {50, 60, 114, 140, 178, 220};
 
-    Matrix A = mat_new(M, K);
-    Matrix B = mat_new(K, N);
+    const char *why = restriction_violated(ke.restrictions, M, N, K, ke.nthreads);
+    if (why != nullptr) {
+        SKIP(ke.name << " restricted on the exact case: " << why);
+    }
+
+    Matrix A(M, K), B(K, N), C(M, N);
     scatter_to_matrix(A, a_vals, M, K);
     scatter_to_matrix(B, b_vals, K, N);
+    C.zero();
 
-    for (size_t k = 0; k < num_kernels; k++) {
-        const kernel_entry_t *ke = &kernels[k];
+    ke.func(A, B, C);
 
-        if (filter && !strstr(ke->name, filter)) {
-            continue;
+    INFO("kernel " << ke.name);
+    for (size_t i = 0; i < M; i++) {
+        for (size_t j = 0; j < N; j++) {
+            INFO("at [" << i << "][" << j << "]");
+            CHECK(C.data()[i * C.stride() + j] == expected[i * N + j]);
         }
-
-        const char *why = restriction_violated(ke->restrictions, M, N, K, ke->nthreads);
-        if (why) {
-            printf("SKIP %-11s %4zux%4zux%4zu [%-5s] %s\n", ke->name, M, N, K, "exact", why);
-            tally->skipped++;
-            continue;
-        }
-
-        Matrix C = mat_new(M, N);
-        C.zero();
-
-        ke->func(A, B, C);
-
-        bool ok = true;
-        for (size_t i = 0; i < M && ok; i++) {
-            for (size_t j = 0; j < N && ok; j++) {
-                const float got = C.data()[i * mat_stride(C) + j];
-                if (got != expected[i * N + j]) {
-                    printf("FAIL %-11s %4zux%4zux%4zu [%-5s] at [%zu][%zu] "
-                           "expected=%.1f actual=%.1f\n",
-                           ke->name, M, N, K, "exact", i, j, (double)expected[i * N + j],
-                           (double)got);
-                    ok = false;
-                }
-            }
-        }
-
-        if (ok) {
-            printf("PASS %-11s %4zux%4zux%4zu [%-5s] exact match\n", ke->name, M, N, K,
-                   "exact");
-            tally->passed++;
-        } else {
-            failures++;
-            tally->failed++;
-        }
-
     }
-
-    return failures;
 }
 
-int main(int argc, char **argv) {
-    const char *filter = NULL;
-    bool fuzz = false;
+// Randomised shapes against the reference. A fixed table always misses some
+// combination of edges, and each iteration is at most 2*80^3 = 1.0 MFLOP.
+//
+// Hidden behind a dot tag, so it runs only when asked for: `gemm_tests [.fuzz]`.
+// The reference is built once per (shape, prefill) and reused across all ten
+// kernels - rebuilding it per kernel would dominate the run.
+TEST_CASE("gemm kernels match the reference on random shapes", "[gemm][.fuzz]") {
+    srand(SEED);
 
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--fuzz") == 0) {
-            fuzz = true;
-        } else {
-            filter = argv[i];
+    for (int it = 0; it < FUZZ_ITERS; it++) {
+        Shape s;
+        s.M = (size_t)(rand() % FUZZ_MAX_DIM) + 1u;
+        s.N = (size_t)(rand() % FUZZ_MAX_DIM) + 1u;
+        s.K = (size_t)(rand() % FUZZ_MAX_DIM) + 1u;
+
+        for (const Prefill mode : {Prefill::Zero, Prefill::Pattern}) {
+            // build_fixture reseeds from the dimensions, so a fuzz failure is
+            // reproducible from the shape alone
+            const Fixture f = build_fixture(s, mode);
+            REQUIRE(reference_magnitude(f.ref) > 0.0);
+
+            for (const KernelEntry &ke : kernels) {
+                if (restriction_violated(ke.restrictions, s.M, s.N, s.K, ke.nthreads) != nullptr) {
+                    continue;
+                }
+                check_kernel(s, ke, mode, f);
+            }
         }
     }
-
-    printf("GEMM correctness harness (seed=0x%X, atol=%.1e, rtol=%.1e)\n", SEED, (double)ATOL,
-           (double)RTOL);
-    if (filter) {
-        printf("Filter: kernels containing \"%s\"\n", filter);
-    }
-    printf("--------------------------------------------------------------------------\n");
-
-    tally_t tally;
-    tally.passed = tally.failed = tally.skipped = 0;
-    tally.quiet  = false;
-
-    size_t failures = 0;
-    for (size_t i = 0; i < num_shapes; i++) {
-        failures += run_shape(shapes[i], filter, &tally);
-    }
-
-    failures += run_known_values(filter, &tally);
-
-    if (fuzz) {
-        tally.quiet = true; // one line per shape and kernel would be 5000 lines
-        failures += run_fuzz(filter, &tally);
-    }
-
-    printf("--------------------------------------------------------------------------\n");
-    printf("passed=%zu failed=%zu skipped=%zu\n", tally.passed, tally.failed, tally.skipped);
-    // The SKIP count is the phase 1 progress tracker and has to reach zero
-    printf("phase-1 progress: %zu restricted (kernel, shape) pairs remaining\n",
-           tally.skipped);
-
-    return failures != 0;
 }

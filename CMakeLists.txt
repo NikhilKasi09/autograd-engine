@@ -134,22 +134,15 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(Catch2)
 
-# The shape harness, still its own main() with its own PASS/FAIL reporting.
-# Converted to Catch2 in a later step; for now it is the thing that proves the
-# port did not change any kernel's behaviour.
-add_executable(gemm_tests tests/cpp/test_gemm.cpp)
-target_link_libraries(gemm_tests PRIVATE gemm_core)
-gemm_apply_flags(gemm_tests)
-
-# Catch2 unit tests. The shape harness joins these once it is converted; for
-# now this is where the Matrix class is driven from.
-add_executable(unit_tests
-    tests/cpp/test_smoke.cpp
+# One Catch2 binary for everything. Tags select: "[gemm]" for the shape table,
+# "[matrix]" for the Matrix unit tests, "[.fuzz]" for the randomised run, which
+# is hidden by default because it costs a second.
+add_executable(gemm_tests
+    tests/cpp/test_gemm.cpp
     tests/cpp/test_matrix.cpp
 )
-target_link_libraries(unit_tests PRIVATE gemm_core Catch2::Catch2WithMain)
-gemm_apply_flags(unit_tests)
-add_test(NAME unit_tests COMMAND $<TARGET_FILE:unit_tests>)
+target_link_libraries(gemm_tests PRIVATE gemm_core Catch2::Catch2WithMain)
+gemm_apply_flags(gemm_tests)
 
 # TSan only supports vm.mmap_rnd_bits up to 28 and Ubuntu 24.04 defaults to 32,
 # so without ASLR off the binary dies intermittently with "unexpected memory
