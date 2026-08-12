@@ -1,0 +1,64 @@
+#ifndef TENSOR_OPS_H
+#define TENSOR_OPS_H
+
+#include "tensor.hpp"
+
+/*
+ Elementwise forward kernels. No graph, no gradients - phase 5 builds the DAG
+ over these, and each one here has a backward that phase 6 will write.
+
+ One contract, applied to every op below:
+
+   - Inputs may have ANY strides. A transposed view and an expand'd dimension
+     with stride 0 are both read in place, never materialised. That is what
+     stops phase 8's bias add from allocating an MxN temporary per forward pass.
+   - The output must be contiguous, and is overwritten, not accumulated into.
+     add_into is the single exception and says so in its name.
+   - Shapes must match EXACTLY. There is no implicit broadcasting: a caller who
+     wants one writes .expand(...) at the call site, where it is visible. Phase
+     6 needs the reverse operation - summing back over broadcast dimensions -
+     before implicit promotion is safe to offer.
+   - Violations throw std::invalid_argument. This differs from
+     gemm_check_shapes, which returns bool and reports on stderr; that contract
+     is load-bearing for the existing GEMM harness and is not a style to copy.
+
+ These kernels are SCALAR, deliberately. Elementwise work is
+ memory-bandwidth-bound rather than compute-bound, so vectorising it buys a
+ fraction of what it buys in GEMM, and a stride-general walk that handles
+ stride 0 and a transposed layout does not vectorise cleanly without a
+ separate contiguous fast path. That fast path is a phase 9 measurement, gated
+ on these showing up in an MLP training profile - not an oversight.
+*/
+
+// out = a + b
+void add(const Tensor &a, const Tensor &b, Tensor &out);
+
+// out = a * b, elementwise. Not a matrix product - that is gemm.
+void mul(const Tensor &a, const Tensor &b, Tensor &out);
+
+// out = a * s
+void scale(const Tensor &a, float s, Tensor &out);
+
+// out = max(a, 0)
+void relu(const Tensor &a, Tensor &out);
+
+// dst += src. The only op that reads its destination, and the reason it exists
+// is phase 6: a tensor used twice in the forward pass receives a gradient
+// contribution from each use, and they have to accumulate rather than the
+// second overwriting the first.
+//
+// dst must be contiguous; src may have any strides.
+void add_into(Tensor &dst, const Tensor &src);
+
+// Sum of every element, reading through a's strides - so summing an expand'd
+// view counts each repeat, which is correct and is what phase 6's broadcast
+// backward will rely on.
+//
+// Accumulates in double and returns float. NumPy sums pairwise, and a naive
+// left-to-right float32 accumulation diverges from it by far more than this
+// project's 1e-5 tolerances: over 100000 elements the two answers differ by
+// 1.4e-4 relative, measured. Phase 7 would then report a correct gradient as a
+// failing one, and the evening goes on the reduction instead of the gradient.
+float sum(const Tensor &a);
+
+#endif

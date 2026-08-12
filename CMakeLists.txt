@@ -110,6 +110,7 @@ add_library(gemm_core STATIC
     src/gemm_tiled_simd.cpp
     src/matrix.cpp
     src/tensor.cpp
+    src/tensor_ops.cpp
     src/validate.cpp
 )
 target_include_directories(gemm_core PUBLIC include)
@@ -156,6 +157,7 @@ add_executable(gemm_tests
     tests/cpp/test_gemm.cpp
     tests/cpp/test_matrix.cpp
     tests/cpp/test_tensor.cpp
+    tests/cpp/test_tensor_ops.cpp
 )
 target_link_libraries(gemm_tests PRIVATE gemm_core Catch2::Catch2WithMain)
 gemm_apply_flags(gemm_tests)
