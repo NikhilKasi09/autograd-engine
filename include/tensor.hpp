@@ -133,6 +133,73 @@ public:
     void zero();
     void randomize();
 
+    /* -------------------------------------------------------------------- */
+    /* Views                                                                 */
+    /*                                                                       */
+    /* All six share this tensor's Storage and allocate nothing, with the one */
+    /* stated exception in contiguous(). All are const and return a new       */
+    /* Tensor: a view is a second handle onto one buffer, not a mutation of   */
+    /* the handle you already had.                                            */
+    /*                                                                       */
+    /* All six report bad arguments by throwing std::invalid_argument rather  */
+    /* than asserting. These take runtime values from a caller, unlike        */
+    /* shape() and stride(), which assert because they are hot and their      */
+    /* argument is nearly always a literal.                                   */
+    /* -------------------------------------------------------------------- */
+
+    // Swaps two dimensions. Shape and strides swap together; nothing moves in
+    // memory, so the result is almost never contiguous.
+    //
+    // Throws if either dimension is out of range.
+    Tensor transpose(std::size_t d0, std::size_t d1) const;
+
+    // General dimension reordering: result dimension i takes its extent and
+    // stride from this tensor's dimension dims[i].
+    //
+    // Throws unless dims is exactly a permutation of 0..rank()-1 - the same
+    // length, every dimension present, none twice.
+    Tensor permute(std::initializer_list<std::size_t> dims) const;
+
+    // Narrows one dimension to [start, start + count). Strides are untouched;
+    // only the offset moves and one extent shrinks. This is the operation
+    // offset_ exists for.
+    //
+    // Throws if dim is out of range, if count is 0 - there are no empty
+    // tensors - or if start + count exceeds the extent. Write that last check
+    // as start + count > shape, never start > shape - count, which wraps.
+    Tensor slice(std::size_t dim, std::size_t start, std::size_t count) const;
+
+    // Broadcasts: any dimension whose extent is 1 may be stretched to any
+    // extent, and gets stride 0 so every index on it addresses one element.
+    // Rank is unchanged; every other extent must match exactly.
+    //
+    // The result must never be written through - several logical elements
+    // alias one float. That is why the step 5 op layer requires its output
+    // contiguous, and why zero() and randomize() refuse a non-contiguous
+    // tensor.
+    //
+    // Throws if the rank differs or a dimension whose extent is not 1 is
+    // asked to change.
+    Tensor expand(std::initializer_list<std::size_t> shape) const;
+
+    // Reinterprets the same elements under a new shape, with fresh row-major
+    // strides. Requires the same element count.
+    //
+    // Throws unless is_contiguous(), deliberately: torch's reshape falls back
+    // to a copy and its view throws, and one function with two performance
+    // profiles behind identical syntax is how a training loop gets
+    // mysteriously slow. Callers who want the copy write
+    // .contiguous().reshape(...) and can see themselves paying for it.
+    Tensor reshape(std::initializer_list<std::size_t> shape) const;
+
+    // Returns a tensor with the same values in dense row-major order.
+    //
+    // The ONLY one of the six that may allocate, and only when it has to: if
+    // this tensor is already contiguous it returns a handle onto the same
+    // buffer and costs a refcount bump. Every kernel boundary calls this, so
+    // that fast path is the reason Tensor is copyable at all.
+    Tensor contiguous() const;
+
     // Element access. sizeof...(idx) must equal rank(); asserted in debug,
     // undefined otherwise. Defined in the header because it is a template.
     template <typename... Idx>
@@ -178,6 +245,8 @@ private:
     // array can never be overrun by an over-long list.
     static std::array<std::size_t, MAX_RANK>
     checked_shape(std::initializer_list<std::size_t> shape);
+    static std::size_t numel_of(const std::array<std::size_t, MAX_RANK>& shape, std::size_t rank);
+    static std::array<std::size_t, MAX_RANK> row_major_strides(const std::array<std::size_t, MAX_RANK>& shape, std::size_t rank);
 
     // Allocating constructor: fresh Storage sized to the shape product,
     // row-major strides derived from the shape, offset 0.
