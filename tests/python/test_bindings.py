@@ -4,14 +4,7 @@ Proves the compiled module imports and round-trips a value. Replaced by real
 tensor tests in roadmap phase 4.
 """
 
-import sys
-from pathlib import Path
-
-# The module is built into python/ by CMake rather than installed.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(_REPO_ROOT / "python"))
-
-import _core  # noqa: E402
+from autograd import _core
 
 
 def test_module_imports() -> None:

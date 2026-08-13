@@ -7,15 +7,10 @@ assumptions. NumPy is the independent third opinion.
 These fail until the bindings in bindings/bindings.cpp are implemented.
 """
 
-import sys
-from pathlib import Path
-
 import numpy as np
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "python"))
-
-import _core  # noqa: E402
+from autograd import _core
 
 KERNELS = ["naive", "ikj", "tiled", "avx2", "tiled_simd", "multithreaded"]
 

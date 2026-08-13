@@ -202,9 +202,31 @@ cmake --build build -j
 ./build/gemm_benchmark 8      # ...or a specific thread count
 ./build/gemm_tests            # correctness, 1493 assertions
 ./build/gemm_tests "[tensor]" # ...or one tag: tensor, view, ops, gemm
-ctest --test-dir build        # same, through ctest
 .venv/bin/pytest tests/python # bindings and the NumPy cross-check
+ctest --test-dir build        # both suites together
 ```
+
+`ctest` does not build, so the full command is
+`cmake --build build && ctest --test-dir build`.
+
+Each build tree writes its own complete `autograd` package — `_core` plus a
+copy of `__init__.py` — so a tree can be tested without disturbing any other.
+Only a Release, unsanitised tree writes to `python/`, which is why a bare
+`pytest tests/python` needs no `PYTHONPATH`. Any other tree is selected by
+naming it:
+
+```bash
+cmake -B build-debug -DCMAKE_BUILD_TYPE=Debug -DGEMM_SANITIZE=off
+cmake --build build-debug -j
+PYTHONPATH=build-debug/python .venv/bin/pytest tests/python
+```
+
+That tree is the routine check for anything touching offsets or strides. Its
+asserts are live, so `Tensor::assert_within_storage` fires on every view the
+bindings construct — a stronger detector here than ASan, which cannot see a
+column overrun landing in the next row of the same allocation. Every run prints
+the module it imported in the pytest header, so a wrong-tree import names
+itself.
 
 Sanitisers get their own build directories, since the flags have to reach the
 link line as well as the compile line:
@@ -215,6 +237,11 @@ cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug -DGEMM_SANITIZE=thread
 cmake --build build-asan -j && ctest --test-dir build-asan
 cmake --build build-tsan -j && ctest --test-dir build-tsan
 ```
+
+Those trees build `_core` too, but only into themselves, and ctest runs just
+the C++ suite there: importing an instrumented module into a stock CPython
+needs `LD_PRELOAD`, `ASAN_OPTIONS=detect_leaks=0` and `PYTHONMALLOC=malloc`,
+which is a manual one-off rather than something ctest should attempt.
 
 TSan needs ASLR off on Ubuntu 24.04, which defaults `vm.mmap_rnd_bits` to 32
 where TSan supports 28. CMake wraps the test in `setarch -R` automatically;

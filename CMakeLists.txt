@@ -81,24 +81,46 @@ endif()
 
 find_package(pybind11 CONFIG REQUIRED)
 
-# Only the unsanitized build produces the Python module, because every build
-# tree drops it at the same path below. A sanitizer build would otherwise
-# overwrite the Release module with an instrumented one, and importing that
-# without LD_PRELOADing the sanitizer runtime fails with "ASan runtime does not
-# come first in initial library list" - which looks like a broken binding
-# rather than a clobbered file.
-if(GEMM_SANITIZE STREQUAL "off")
-    pybind11_add_module(_core bindings/bindings.cpp)
-    gemm_apply_flags(_core)
+# Every tree used to write the module to one shared path, so a sanitizer build
+# clobbered the Release module with an instrumented one that cannot be imported
+# ("ASan runtime does not come first in initial library list") - which looks
+# like a broken binding rather than a clobbered file. The old fix was to build
+# the module only in unsanitized trees; this is the better one, and it lets the
+# sanitizer and Debug trees have a module at all.
+#
+# Only the canonical Release tree writes next to the sources, so a bare
+# `pytest tests/python` from the repo root still works with no PYTHONPATH.
+set(GEMM_PYTHON_ROOT "" CACHE PATH "Directory placed on sys.path; holds the autograd package")
+if(NOT GEMM_PYTHON_ROOT)
+    if(CMAKE_BUILD_TYPE STREQUAL "Release" AND GEMM_SANITIZE STREQUAL "off")
+        set(GEMM_PYTHON_ROOT "${CMAKE_SOURCE_DIR}/python")
+    else()
+        set(GEMM_PYTHON_ROOT "${CMAKE_BINARY_DIR}/python")
+    endif()
+endif()
+set(GEMM_PYTHON_MODULE_DIR "${GEMM_PYTHON_ROOT}/autograd")
 
-    # The bindings call the kernels, so they need the library and, through its
-    # PUBLIC include directory, the headers.
-    target_link_libraries(_core PRIVATE gemm_core)
+pybind11_add_module(_core bindings/bindings.cpp)
+gemm_apply_flags(_core)
 
-    # Drop the module next to the Python sources so pytest imports it without an
-    # install step or a PYTHONPATH dance.
-    set_target_properties(_core PROPERTIES
-        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/python")
+# The bindings call the kernels, so they need the library and, through its
+# PUBLIC include directory, the headers.
+target_link_libraries(_core PRIVATE gemm_core)
+
+set_target_properties(_core PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${GEMM_PYTHON_MODULE_DIR}")
+
+# Every tree gets its own __init__.py beside its own _core, so each tree is a
+# complete importable package and PYTHONPATH alone decides which one is used.
+# Without this the source-tree package would be the only one that imports, and
+# pointing PYTHONPATH at a build tree would find a _core with no package around
+# it - or worse, fall back to the stale Release module.
+if(NOT GEMM_PYTHON_MODULE_DIR STREQUAL "${CMAKE_SOURCE_DIR}/python/autograd")
+    add_custom_command(TARGET _core POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_SOURCE_DIR}/python/autograd/__init__.py"
+                "${GEMM_PYTHON_MODULE_DIR}/__init__.py"
+        COMMENT "Copying autograd/__init__.py next to _core")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -175,4 +197,21 @@ if(GEMM_SANITIZE STREQUAL "thread")
     add_test(NAME gemm_tests COMMAND setarch ${CMAKE_SYSTEM_PROCESSOR} -R $<TARGET_FILE:gemm_tests>)
 else()
     add_test(NAME gemm_tests COMMAND $<TARGET_FILE:gemm_tests>)
+endif()
+
+# The Python suite is part of the test surface from phase 4 on, so `ctest` is
+# the one command. Note ctest does not build: run `cmake --build build` first.
+#
+# Registered only for unsanitized trees. A sanitized _core still gets *built*
+# above, but importing one into a stock CPython needs LD_PRELOAD plus
+# ASAN_OPTIONS plus PYTHONMALLOC, which is a documented manual one-off rather
+# than something ctest should attempt.
+#
+# GEMM_EXPECTED_MODULE_DIR turns a wrong-tree import into a hard failure in
+# conftest.py rather than a quietly wrong set of numbers.
+if(GEMM_SANITIZE STREQUAL "off")
+    add_test(NAME python_bindings
+             COMMAND "${Python3_EXECUTABLE}" -m pytest "${CMAKE_SOURCE_DIR}/tests/python" -q)
+    set_tests_properties(python_bindings PROPERTIES
+        ENVIRONMENT "PYTHONPATH=${GEMM_PYTHON_ROOT};GEMM_EXPECTED_MODULE_DIR=${GEMM_PYTHON_MODULE_DIR}")
 endif()

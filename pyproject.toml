@@ -1,0 +1,14 @@
+# Pytest configuration only.
+#
+# There is no [build-system] table: this project builds through CMake, and
+# pip-installability is a separate decision that is not on the roadmap.
+#
+# There is deliberately no `pythonpath` entry either. That option front-inserts
+# into sys.path *ahead* of PYTHONPATH, so pinning the source tree here would
+# win over an explicitly requested build tree - and a stale .so left in the
+# source tree would then be tested silently while you believed you were testing
+# the other one. That is the two-trees-one-path trap with the arrow reversed.
+# Path selection lives in the environment; conftest.py only appends a fallback.
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+filterwarnings = ["error"]
