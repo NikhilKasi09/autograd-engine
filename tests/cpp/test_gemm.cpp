@@ -427,8 +427,8 @@ TEST_CASE("gemm kernels match the reference on random shapes", "[gemm][.fuzz]") 
 /*                                                                           */
 /* The kernels take a raw pointer and one leading dimension per operand.     */
 /* That expresses stride(0) and nothing else, so rank must be 2 and the      */
-/* inner stride must be 1. Neither was checkable while operands were a       */
-/* Matrix, because a Matrix could not be anything else.                      */
+/* inner stride must be 1. Neither was checkable while an operand was the    */
+/* old rank-2 matrix type, which could not be anything else.                 */
 /*                                                                           */
 /* A rejecting wrapper leaves C untouched, so "was it rejected" is asked by  */
 /* checking C is still zero - the same observable contract the               */

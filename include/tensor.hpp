@@ -40,7 +40,8 @@ static_assert(MAX_RANK >= 2, "GEMM operands are rank 2");
 // opinion about how the floats are indexed.
 //
 // Sharing happens through shared_ptr<Storage> held by Tensor, not by copying
-// Storage itself - hence copy stays deleted here, exactly as it was on Matrix.
+// Storage itself - hence copy stays deleted here, as it was on the owning
+// rank-2 matrix type this replaced.
 class Storage {
 public:
     // Allocates size floats, zero-initialised, base pointer aligned to
@@ -89,7 +90,8 @@ public:
     Tensor(Tensor &&) noexcept                 = default;
     Tensor &operator=(Tensor &&) noexcept      = default;
 
-    // Copy is SHALLOW and defaulted - the opposite of Matrix, which deleted it.
+    // Copy is SHALLOW and defaulted - the opposite of the rank-2 matrix type
+    // this replaced, which deleted copy outright.
     // Two Tensors sharing one buffer is the whole point of the type: it is how
     // a view exists at all. clone() is the deep copy.
     //
@@ -295,7 +297,8 @@ private:
     std::size_t                         rank_ = 0;
 };
 
-// Inverted from the Matrix versions, and inverted on purpose. If you reach for
+// Inverted from the equivalents on the type this replaced, and inverted on
+// purpose. If you reach for
 // = delete on the copy operations out of habit, the build stops here.
 static_assert(std::is_copy_constructible_v<Tensor>,
               "Tensor copy must be shallow and allowed - it is how views exist");

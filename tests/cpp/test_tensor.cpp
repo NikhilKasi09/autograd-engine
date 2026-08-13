@@ -109,7 +109,7 @@ TEST_CASE("Tensor allocates storage aligned for AVX2", "[tensor]") {
 
 TEST_CASE("Tensor is zero-initialised on construction", "[tensor]") {
     // The GEMM harness relies on a freshly created C being zero. Same
-    // contract here as Matrix had.
+    // contract here as the matrix type this replaced.
     const Tensor t({4, 6});
 
     for (std::size_t i = 0; i < t.numel(); i++) {
@@ -142,7 +142,7 @@ TEST_CASE("copying a Tensor shares storage", "[tensor]") {
     Tensor original({3, 4});
     original(1, 1) = 7.0f;
 
-    Tensor copy = original; // shallow, unlike Matrix, which deleted this
+    Tensor copy = original; // shallow, where the old matrix type deleted copy
 
     REQUIRE(copy.shares_storage_with(original));
     REQUIRE(copy.data() == original.data());

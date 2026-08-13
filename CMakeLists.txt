@@ -116,7 +116,6 @@ add_library(gemm_core STATIC
     src/gemm_simd.cpp
     src/gemm_tiled.cpp
     src/gemm_tiled_simd.cpp
-    src/matrix.cpp
     src/tensor.cpp
     src/tensor_ops.cpp
     src/validate.cpp
@@ -158,12 +157,11 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Catch2)
 
 # One Catch2 binary for everything. Tags select: "[gemm]" for the shape table,
-# "[matrix]" for the Matrix unit tests, "[tensor]" for the Tensor ones,
-# "[.fuzz]" for the randomised run, which is hidden by default because it
-# costs a second.
+# "[tensor]" for the Tensor units, "[view]" for the view operations, "[ops]"
+# for the elementwise layer, and "[.fuzz]" for the randomised run, which is
+# hidden by default because it costs a second.
 add_executable(gemm_tests
     tests/cpp/test_gemm.cpp
-    tests/cpp/test_matrix.cpp
     tests/cpp/test_tensor.cpp
     tests/cpp/test_tensor_ops.cpp
 )
