@@ -15,9 +15,10 @@ No BLAS library is used anywhere. Writing the kernel is the point.
 ## Where it is now
 
 The GEMM library is finished, handles arbitrary shapes, and has been ported
-from C to C++. The autograd half has not been started yet.
+from C to C++. The tensor type it runs on is finished too. The autograd half
+has not been started yet.
 
-The port replaced `posix_memalign`/`free` with an RAII `Matrix` that owns its
+The port replaced `posix_memalign`/`free` with RAII storage that owns its
 aligned buffer, pthreads with `std::jthread`, the Makefile with CMake, and the
 hand-written test harness with Catch2. It changed no kernel logic: the tiling,
 the intrinsics and the ragged-edge peeling came across untouched, which is
@@ -123,6 +124,72 @@ In practice, keeping N a multiple of 8 and M a multiple of 4 avoids it
 entirely. `_mm256_maskload_ps` would remove the strips altogether and is the
 obvious next optimisation.
 
+## The tensor type
+
+The kernels used to take a `Matrix`: rank two, one stride, sole owner of its
+buffer. That type is gone. Everything takes a `Tensor` now, which is a shape,
+a stride per dimension, an offset, and a `shared_ptr` to a refcounted buffer.
+
+The kernels themselves did not change at all. A rank-2 tensor with unit inner
+stride is already the raw pointer and leading dimension they take, so swapping
+the storage type came to 107 lines of signatures and accessors across 16 files
+and not one line inside a loop. Keeping the storage type out of the inner loops
+is what made that cheap, and this was the first real test of it.
+
+Three decisions in it are worth explaining.
+
+**Copying a tensor is shallow, where copying a matrix was a compile error.**
+The old type deleted its copy constructor, on the grounds that copying a
+1024x1024 matrix by accident costs 4MB and is invisible in a benchmark loop. A
+tensor cannot keep that rule. A transpose, a slice and a broadcast are all just
+a second handle onto one buffer, so two tensors sharing storage is the normal
+case rather than the bug. `clone()` is the deep copy, and the compiler has
+stopped being the thing that catches an accidental one.
+
+**`reshape` throws on a non-contiguous tensor instead of quietly copying.**
+Torch's `reshape` falls back to a copy where its `view` throws. One function
+with two performance profiles behind identical syntax is how a training loop
+ends up mysteriously slow, so there is one function here and it refuses.
+Callers who want the copy write `.contiguous().reshape(...)` and can see
+themselves paying for it.
+
+**There is no rank-0 tensor and no empty one.** A scalar is shape `{1}`. Both
+are divergences from torch, and both are there so that no kernel, no reduction
+and no printing path needs a special case for a tensor with nothing in it.
+
+The views are `transpose`, `permute`, `slice`, `expand`, `reshape` and
+`contiguous`. All of them share storage and allocate nothing, except
+`contiguous` when it has no choice. `expand` is the broadcast: stretching a
+length-1 dimension gives it a stride of zero, so every index along it lands on
+the same element, and adding a bias row to a whole batch costs no copy.
+
+Bad offset arithmetic is the failure mode a type like this invites, and ASan is
+poor at catching it, since a column overrun lands in the next row of the same
+allocation on every row but the last. So every view checks, in debug builds,
+that the furthest element it can address is still inside the buffer. Views can
+only be built through one private constructor, which is what makes that check
+impossible to forget rather than merely conventional.
+
+## Elementwise ops
+
+`add`, `mul`, `scale`, `relu`, `add_into` and `sum`. Inputs may have any
+strides, so a transposed view or a broadcast is read where it lies; the output
+has to be contiguous. Shapes have to match exactly. There is no implicit
+broadcasting: a caller who wants one writes `expand` at the call site, where it
+is visible.
+
+These are scalar, on purpose. Elementwise work is memory bandwidth bound rather
+than compute bound, so vectorising it buys a fraction of what it buys in GEMM,
+and a stride-general walk that has to handle stride 0 does not vectorise
+cleanly without a separate contiguous fast path. That fast path is worth
+writing when a training loop says so, and not before.
+
+`sum` accumulates in a double and returns a float. NumPy sums pairwise, and a
+plain left-to-right float32 accumulation over 100000 elements drifts 1.4e-4
+away from it, which is fourteen times the tolerance used everywhere else here.
+Gradient checking would have reported that as a broken gradient rather than a
+broken reduction, which is an evening nobody gets back.
+
 ## Building
 
 ```bash
@@ -133,7 +200,8 @@ cmake --build build -j
 
 ./build/gemm_benchmark        # the ladder, all hardware threads
 ./build/gemm_benchmark 8      # ...or a specific thread count
-./build/gemm_tests            # correctness, 1085 assertions
+./build/gemm_tests            # correctness, 1493 assertions
+./build/gemm_tests "[tensor]" # ...or one tag: tensor, view, ops, gemm
 ctest --test-dir build        # same, through ctest
 .venv/bin/pytest tests/python # bindings and the NumPy cross-check
 ```
@@ -183,6 +251,12 @@ Two further checks the harness cannot make on its own:
   evidence than it looks. `pytest tests/python` checks `np.allclose` against
   `a @ b` over 12 shapes and all six kernels.
 
+The tensor and op tests make up the rest of that count. The ones that earn
+their place are the ones handing an op a transposed or broadcast input, since
+a kernel that ignores strides and walks the buffer flat passes every contiguous
+case and fails those immediately. One is arranged so that the wrong answer
+holds the right values in the wrong order, which a checksum would wave through.
+
 Worth knowing: ASan cannot catch a column overrun on any row except the last,
 because it lands in the next row of the same allocation. The numeric comparison
 is what actually catches those.
@@ -191,7 +265,7 @@ is what actually catches those.
 
 - [x] Generalise the GEMM library to arbitrary M, N and K
 - [x] Port to C++, CMake, Catch2
-- [ ] Tensor type: shape, strides, contiguous storage
+- [x] Tensor type: shape, strides, views, elementwise ops
 - [ ] pybind11 bindings
 - [ ] Autograd graph and `backward()`
 - [ ] Backward kernels
@@ -209,4 +283,4 @@ The history of that work is preserved in this repo's commits.
 
 Everything since then is mine: generalising all six kernels to arbitrary
 shapes, the leading-dimension rework, the test harness, the benchmarking
-above, and the port to C++.
+above, the port to C++, and the tensor type.
