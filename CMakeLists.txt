@@ -81,17 +81,25 @@ endif()
 
 find_package(pybind11 CONFIG REQUIRED)
 
-pybind11_add_module(_core bindings/bindings.cpp)
-gemm_apply_flags(_core)
+# Only the unsanitized build produces the Python module, because every build
+# tree drops it at the same path below. A sanitizer build would otherwise
+# overwrite the Release module with an instrumented one, and importing that
+# without LD_PRELOADing the sanitizer runtime fails with "ASan runtime does not
+# come first in initial library list" - which looks like a broken binding
+# rather than a clobbered file.
+if(GEMM_SANITIZE STREQUAL "off")
+    pybind11_add_module(_core bindings/bindings.cpp)
+    gemm_apply_flags(_core)
 
-# The bindings call the kernels, so they need the library and, through its
-# PUBLIC include directory, the headers.
-target_link_libraries(_core PRIVATE gemm_core)
+    # The bindings call the kernels, so they need the library and, through its
+    # PUBLIC include directory, the headers.
+    target_link_libraries(_core PRIVATE gemm_core)
 
-# Drop the module next to the Python sources so pytest imports it without an
-# install step or a PYTHONPATH dance.
-set_target_properties(_core PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/python")
+    # Drop the module next to the Python sources so pytest imports it without an
+    # install step or a PYTHONPATH dance.
+    set_target_properties(_core PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/python")
+endif()
 
 # ---------------------------------------------------------------------------
 # GEMM library
