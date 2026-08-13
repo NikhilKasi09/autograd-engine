@@ -67,14 +67,14 @@ static void gemm_avx2_kernel(size_t M, size_t N, size_t K,
 }
 
 // Public wrapper
-void gemm_avx2(const Matrix &A, const Matrix &B, Matrix &C) {
+void gemm_avx2(const Tensor &A, const Tensor &B, Tensor &C) {
     if (!gemm_check_shapes("gemm_avx2", A, B, C)) {
         return;
     }
 
     // M and N come from C, K is the inner dimension the two operands share
-    gemm_avx2_kernel(C.rows(), C.cols(), A.cols(),
-                     A.data(), A.stride(),
-                     B.data(), B.stride(),
-                     C.data(), C.stride());
+    gemm_avx2_kernel(C.shape(0), C.shape(1), A.shape(1),
+                     A.data(), A.stride(0),
+                     B.data(), B.stride(0),
+                     C.data(), C.stride(0));
 }

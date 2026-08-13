@@ -4,7 +4,7 @@
 
 #define TIMED_RUNS    5
 
-benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const Matrix &A, const Matrix &B, Matrix &C) {
+benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const Tensor &A, const Tensor &B, Tensor &C) {
     
     struct timespec start, end;
     benchmark_result_t result;
@@ -60,7 +60,7 @@ benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const Matrix &A, const 
 
     // Calculate GigaFLOP/s. Every factor is cast to double before being
     // multiplied, otherwise M * N * K overflows in size_t first.
-    double total_flops = 2.0 * (double)C.rows() * (double)C.cols() * (double)A.cols();
+    double total_flops = 2.0 * (double)C.shape(0) * (double)C.shape(1) * (double)A.shape(1);
 
     // Prevent division by zero if the clock was too fast
     if (median_seconds > 0.0) {

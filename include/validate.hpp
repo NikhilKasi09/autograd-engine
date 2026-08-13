@@ -1,9 +1,9 @@
 #ifndef VALIDATE_H
 #define VALIDATE_H
 
-#include "matrix.hpp"
+#include "tensor.hpp"
 
-// Compares two matrices element-by-element. Returns true if they match.
-bool matrices_match(const Matrix &expected, const Matrix &actual);
+// Compares two rank-2 tensors element-by-element. Returns true if they match.
+bool tensors_match(const Tensor &expected, const Tensor &actual);
 
 #endif

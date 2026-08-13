@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "matrix.hpp"
+#include "tensor.hpp"
 #include "gemm.hpp"
 #include "benchmark.hpp"
 #include "validate.hpp"
@@ -15,7 +15,7 @@ namespace {
 int bench_threads = 8;
 }
 
-void gemm_multithreaded_wrapper(const Matrix &A, const Matrix &B, Matrix &C) {
+void gemm_multithreaded_wrapper(const Tensor &A, const Tensor &B, Tensor &C) {
     gemm_multithreaded(A, B, C, bench_threads);
 }
 
@@ -74,10 +74,10 @@ int main(int argc, char **argv) {
         for (int s = 0; s < num_shapes; s++) {
             size_t M = shapes[s].M, N = shapes[s].N, K = shapes[s].K;
 
-            Matrix A(M, K);
-            Matrix B(K, N);
-            Matrix C(M, N);
-            Matrix expected_C(M, N);
+            Tensor A({M, K});
+            Tensor B({K, N});
+            Tensor C({M, N});
+            Tensor expected_C({M, N});
 
             A.randomize();
             B.randomize();
@@ -100,7 +100,7 @@ int main(int argc, char **argv) {
                     naive_time = res.elapsed_seconds;
                 } else {
                     // For all other kernels, prove they match the Naive output
-                    if (!matrices_match(expected_C, C)) {
+                    if (!tensors_match(expected_C, C)) {
                         fprintf(stderr, "Validation failed for %s at %zux%zux%zu\n",
                                 kernels[k].name, M, N, K);
                         return 1;

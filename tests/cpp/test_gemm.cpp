@@ -16,7 +16,7 @@
 // unless asked for.
 
 #include "gemm.hpp"
-#include "matrix.hpp"
+#include "tensor.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -128,7 +128,7 @@ std::ostream &operator<<(std::ostream &os, Prefill p) {
 
 // Declared here rather than pulling in benchmark.hpp for its gemm_kernel_ptr:
 // a correctness harness has no business depending on the timing header.
-using GemmFn = void (*)(const Matrix &, const Matrix &, Matrix &);
+using GemmFn = void (*)(const Tensor &, const Tensor &, Tensor &);
 
 struct KernelEntry {
     const char *name;
@@ -150,13 +150,13 @@ const KernelEntry kernels[] = {
     {"tiled",      gemm_tiled,      0,  0},
     {"avx2",       gemm_avx2,       0,  0},
     {"tiled_simd", gemm_tiled_simd, 0,  0},
-    {"mt1",  [](const Matrix &A, const Matrix &B, Matrix &C) { gemm_multithreaded(A, B, C, 1); },  0,  1},
-    {"mt2",  [](const Matrix &A, const Matrix &B, Matrix &C) { gemm_multithreaded(A, B, C, 2); },  0,  2},
-    {"mt3",  [](const Matrix &A, const Matrix &B, Matrix &C) { gemm_multithreaded(A, B, C, 3); },  0,  3},
-    {"mt8",  [](const Matrix &A, const Matrix &B, Matrix &C) { gemm_multithreaded(A, B, C, 8); },  0,  8},
+    {"mt1",  [](const Tensor &A, const Tensor &B, Tensor &C) { gemm_multithreaded(A, B, C, 1); },  0,  1},
+    {"mt2",  [](const Tensor &A, const Tensor &B, Tensor &C) { gemm_multithreaded(A, B, C, 2); },  0,  2},
+    {"mt3",  [](const Tensor &A, const Tensor &B, Tensor &C) { gemm_multithreaded(A, B, C, 3); },  0,  3},
+    {"mt8",  [](const Tensor &A, const Tensor &B, Tensor &C) { gemm_multithreaded(A, B, C, 8); },  0,  8},
     // 64 threads is well past the row count of most shapes in the table, so
     // this is the one that exercises the clamp
-    {"mt64", [](const Matrix &A, const Matrix &B, Matrix &C) { gemm_multithreaded(A, B, C, 64); }, 0, 64},
+    {"mt64", [](const Tensor &A, const Tensor &B, Tensor &C) { gemm_multithreaded(A, B, C, 64); }, 0, 64},
 };
 
 // Each dimension independently crosses the vector width (8), the register
@@ -218,12 +218,12 @@ void make_prefill(std::vector<float> &buf, size_t M, size_t N, Prefill mode) {
     }
 }
 
-// Copies a dense MxN buffer into a Matrix, honouring the matrix's stride
-void scatter_to_matrix(Matrix &dst, const float *src, size_t rows, size_t cols) {
-    const size_t stride = dst.stride();
+// Copies a dense MxN buffer into a Tensor, honouring the tensor's row stride
+void scatter_to_tensor(Tensor &dst, const float *src, size_t rows, size_t cols) {
+    const size_t stride = dst.stride(0);
 
     // Scrub the whole allocation first so nothing carries over between runs
-    memset(dst.data(), 0, dst.rows() * stride * sizeof(float));
+    memset(dst.data(), 0, dst.shape(0) * stride * sizeof(float));
 
     for (size_t i = 0; i < rows; i++) {
         memcpy(&dst.data()[i * stride], &src[i * cols], cols * sizeof(float));
@@ -238,10 +238,10 @@ struct CompareResult {
     float  expected, actual;
 };
 
-CompareResult compare_to_reference(const std::vector<float> &ref, const Matrix &C, size_t M,
+CompareResult compare_to_reference(const std::vector<float> &ref, const Tensor &C, size_t M,
                                    size_t N) {
     CompareResult r{true, 0.0, 0.0, 0, 0, 0.0f, 0.0f};
-    const size_t  stride = C.stride();
+    const size_t  stride = C.stride(0);
 
     for (size_t i = 0; i < M; i++) {
         for (size_t j = 0; j < N; j++) {
@@ -311,10 +311,10 @@ double reference_magnitude(const std::vector<float> &ref) {
 }
 
 void check_kernel(const Shape &s, const KernelEntry &ke, Prefill mode, const Fixture &f) {
-    Matrix A(s.M, s.K), B(s.K, s.N), C(s.M, s.N);
-    scatter_to_matrix(A, f.a.data(), s.M, s.K);
-    scatter_to_matrix(B, f.b.data(), s.K, s.N);
-    scatter_to_matrix(C, f.c_seed.data(), s.M, s.N);
+    Tensor A({s.M, s.K}), B({s.K, s.N}), C({s.M, s.N});
+    scatter_to_tensor(A, f.a.data(), s.M, s.K);
+    scatter_to_tensor(B, f.b.data(), s.K, s.N);
+    scatter_to_tensor(C, f.c_seed.data(), s.M, s.N);
 
     ke.func(A, B, C);
 
@@ -375,9 +375,9 @@ TEST_CASE("gemm kernels reproduce a hand-computed product exactly", "[gemm][exac
         SKIP(ke.name << " restricted on the exact case: " << why);
     }
 
-    Matrix A(M, K), B(K, N), C(M, N);
-    scatter_to_matrix(A, a_vals, M, K);
-    scatter_to_matrix(B, b_vals, K, N);
+    Tensor A({M, K}), B({K, N}), C({M, N});
+    scatter_to_tensor(A, a_vals, M, K);
+    scatter_to_tensor(B, b_vals, K, N);
     C.zero();
 
     ke.func(A, B, C);
@@ -386,7 +386,7 @@ TEST_CASE("gemm kernels reproduce a hand-computed product exactly", "[gemm][exac
     for (size_t i = 0; i < M; i++) {
         for (size_t j = 0; j < N; j++) {
             INFO("at [" << i << "][" << j << "]");
-            CHECK(C.data()[i * C.stride() + j] == expected[i * N + j]);
+            CHECK(C.data()[i * C.stride(0) + j] == expected[i * N + j]);
         }
     }
 }

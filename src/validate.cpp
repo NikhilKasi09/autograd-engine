@@ -8,21 +8,21 @@
 #define ATOL 1e-5f
 #define RTOL 1e-5f
 
-bool matrices_match(const Matrix &expected, const Matrix &actual) {
+bool tensors_match(const Tensor &expected, const Tensor &actual) {
     //see if the shape is actually the same
-    if (expected.rows() != actual.rows() || expected.cols() != actual.cols()) {
+    if (expected.shape(0) != actual.shape(0) || expected.shape(1) != actual.shape(1)) {
         fprintf(stderr,
                 "Shape mismatch (expected=%zux%zu, actual=%zux%zu)\n",
-                expected.rows(), expected.cols(), actual.rows(), actual.cols());
+                expected.shape(0), expected.shape(1), actual.shape(0), actual.shape(1));
         return false;
     }
 
-    // Two index expressions, one per matrix. Using the expected matrix's
+    // Two index expressions, one per tensor. Using the expected tensor's
     // stride for both goes wrong the moment the two differ.
-    for (size_t i = 0; i < expected.rows(); i++) {
-        for (size_t j = 0; j < expected.cols(); j++) {
-            size_t e_index = i * expected.stride() + j;
-            size_t a_index = i * actual.stride() + j;
+    for (size_t i = 0; i < expected.shape(0); i++) {
+        for (size_t j = 0; j < expected.shape(1); j++) {
+            size_t e_index = i * expected.stride(0) + j;
+            size_t a_index = i * actual.stride(0) + j;
 
             float diff = fabsf(expected.data()[e_index] - actual.data()[a_index]);
 

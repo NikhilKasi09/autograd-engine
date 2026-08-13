@@ -1,14 +1,14 @@
 #ifndef BENCHMARK_H
 #define BENCHMARK_H
 
-#include "matrix.hpp"
+#include "tensor.hpp"
 
 typedef struct {
     double elapsed_seconds;
     double gigaflops;
 } benchmark_result_t;
 
-typedef void (*gemm_kernel_ptr)(const Matrix &A, const Matrix &B, Matrix &C);
+typedef void (*gemm_kernel_ptr)(const Tensor &A, const Tensor &B, Tensor &C);
 
 /**
  * @brief Wraps a hardware timer around a math kernel and calculates throughput.
@@ -19,6 +19,6 @@ typedef void (*gemm_kernel_ptr)(const Matrix &A, const Matrix &B, Matrix &C);
  * @param C The output matrix, accumulated into.
  * @return A struct containing the exact execution time and GigaFLOP/s.
  */
-benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const Matrix &A, const Matrix &B, Matrix &C);
+benchmark_result_t run_benchmark(gemm_kernel_ptr kernel, const Tensor &A, const Tensor &B, Tensor &C);
 
 #endif

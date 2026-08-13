@@ -6,7 +6,7 @@
 #include <system_error>
 
 
-void gemm_multithreaded(const Matrix &A, const Matrix &B, Matrix &C, int num_threads) {
+void gemm_multithreaded(const Tensor &A, const Tensor &B, Tensor &C, int num_threads) {
     if (!gemm_check_shapes("gemm_multithreaded", A, B, C)) {
         return;
     }
@@ -17,9 +17,9 @@ void gemm_multithreaded(const Matrix &A, const Matrix &B, Matrix &C, int num_thr
     }
 
     // Slicing is over the rows of C, so M is what gets divided up
-    const size_t M = C.rows();
-    const size_t N = C.cols();
-    const size_t K = A.cols();
+    const size_t M = C.shape(0);
+    const size_t N = C.shape(1);
+    const size_t K = A.shape(1);
 
     // Never spin up more threads than there are rows to hand out
     size_t nthreads = (size_t)num_threads;
@@ -58,9 +58,9 @@ void gemm_multithreaded(const Matrix &A, const Matrix &B, Matrix &C, int num_thr
         auto run_slice = [&A, &B, &C, row, thread_rows, N, K]() {
             gemm_tiled_simd_kernel(
                 thread_rows, N, K,
-                A.data() + row * A.stride(), A.stride(),
-                B.data(),                    B.stride(),
-                C.data() + row * C.stride(), C.stride()
+                A.data() + row * A.stride(0), A.stride(0),
+                B.data(),                    B.stride(0),
+                C.data() + row * C.stride(0), C.stride(0)
             );
         };
 

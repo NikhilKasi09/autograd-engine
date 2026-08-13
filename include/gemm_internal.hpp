@@ -1,7 +1,7 @@
 #ifndef GEMM_INTERNAL_H
 #define GEMM_INTERNAL_H
 
-#include "matrix.hpp"
+#include "tensor.hpp"
 
 // Cs `restrict` was never adopted into C++. __restrict is the compiler
 // extension with identical semantics, spelled the same way by gcc, clang and
@@ -35,7 +35,7 @@ void gemm_tiled_simd_kernel(size_t M, size_t N, size_t K,
 
 // Checks A(MxK) * B(KxN) is defined and C is the right shape to hold it.
 // Returns 1 if usable, 0 otherwise, reporting on stderr. Every wrapper calls it.
-bool gemm_check_shapes(const char *who, const Matrix &A, const Matrix &B,
-                       const Matrix &C);
+bool gemm_check_shapes(const char *who, const Tensor &A, const Tensor &B,
+                       const Tensor &C);
 
 #endif
