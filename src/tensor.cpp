@@ -64,6 +64,26 @@ Tensor::checked_shape(std::initializer_list<std::size_t> ilist) {
     return result;
 }
 
+std::array<std::size_t, MAX_RANK>
+Tensor::checked_shape(std::span<const std::size_t> shape) {
+    if (shape.size() < 1 || shape.size() > MAX_RANK) {
+        throw std::invalid_argument("Error: Rank should be in [1, MAX_RANK].");
+    }
+
+    std::array<std::size_t, MAX_RANK> result{};
+
+    std::size_t i = 0;
+    for (std::size_t val : shape) {
+        if (val == 0) {
+            throw std::invalid_argument("Error: every extent must be non-zero.");
+        }
+        result[i] = val;
+        i++;
+    }
+
+    return result;
+}
+
 std::size_t Tensor::numel_of(const std::array<std::size_t, MAX_RANK> &shape, std::size_t rank) {
     std::size_t n = 1;
     for (std::size_t d = 0; d < rank; ++d) {
@@ -104,7 +124,11 @@ Tensor::Tensor(const std::array<std::size_t, MAX_RANK> &shape, std::size_t rank)
 
 // Constructor 2
 Tensor::Tensor(std::initializer_list<std::size_t> ilist)
-    : Tensor(checked_shape(ilist), ilist.size()) {}
+    : Tensor(std::span<const std::size_t>(ilist.begin(), ilist.size())) {}
+
+// Constructor 2b - the runtime-shape door.
+Tensor::Tensor(std::span<const std::size_t> shape)
+    : Tensor(checked_shape(shape), shape.size()) {}
 
 // Constructor 3
 Tensor::Tensor(std::shared_ptr<Storage> p, std::size_t offset,
@@ -247,6 +271,10 @@ Tensor Tensor::transpose(std::size_t d0, std::size_t d1) const { // transposes t
 }
 
 Tensor Tensor::permute(std::initializer_list<std::size_t> dims) const {
+    return permute(std::span<const std::size_t>(dims.begin(), dims.size()));
+}
+
+Tensor Tensor::permute(std::span<const std::size_t> dims) const {
     if (dims.size() != rank_) {
         throw std::invalid_argument("Error: permute requires the same rank.");
     }
@@ -297,6 +325,10 @@ Tensor Tensor::slice(std::size_t dim, std::size_t start, std::size_t count) cons
 }
 
 Tensor Tensor::expand(std::initializer_list<std::size_t> new_shape) const {
+    return expand(std::span<const std::size_t>(new_shape.begin(), new_shape.size())); 
+}
+
+Tensor Tensor::expand(std::span<const std::size_t> new_shape) const {
     if (new_shape.size() != rank_) {
         throw std::invalid_argument("Error: expand requires the same rank.");
     }
@@ -325,6 +357,10 @@ Tensor Tensor::expand(std::initializer_list<std::size_t> new_shape) const {
 
 Tensor Tensor::reshape(std::initializer_list<std::size_t> new_shape) const { // Reinterprets a tensors data under a completely different shape
     
+    return reshape(std::span<const std::size_t>(new_shape.begin(), new_shape.size()));
+}
+
+Tensor Tensor::reshape(std::span<const std::size_t> new_shape) const {
     if (!is_contiguous()){
         throw std::invalid_argument("Error: Tensor has to be contiguous");
     }

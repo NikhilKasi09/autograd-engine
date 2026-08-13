@@ -8,8 +8,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdint>
+#include <span>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 // A brace-enclosed initialiser list inside a macro argument: the preprocessor
 // splits on the commas because braces do not protect them, so every one of
@@ -485,4 +487,140 @@ TEST_CASE("a view of a view composes", "[tensor][view]") {
     REQUIRE(v.data() == t.data() + 8);
     REQUIRE(v(0, 0) == 8.0f);
     REQUIRE(v(2, 1) == 16.0f); // t(2, 4)
+}
+
+/* ------------------------------------------------------------------------- */
+/* Runtime shapes                                                             */
+/*                                                                            */
+/* The span overloads exist because std::initializer_list cannot be built at  */
+/* runtime, so a shape arriving from Python has no other way in. These pin    */
+/* that the span path is the SAME path - not a second, laxer one.             */
+/*                                                                            */
+/* Every case here passes a std::vector, because that is what the binding     */
+/* will hand over and because a vector is what makes the overload resolve to  */
+/* span rather than initializer_list.                                         */
+/* ------------------------------------------------------------------------- */
+
+TEST_CASE("a runtime shape constructs the same tensor as a literal one", "[tensor]") {
+    const std::vector<std::size_t> dims = {2, 3, 4};
+
+    const Tensor from_vector(std::span<const std::size_t>{dims});
+    const Tensor from_literal({2, 3, 4});
+
+    REQUIRE(from_vector.rank() == from_literal.rank());
+    REQUIRE(from_vector.numel() == from_literal.numel());
+    REQUIRE(from_vector.is_contiguous() == from_literal.is_contiguous());
+
+    // Extents AND strides. Element count alone passes on an implementation
+    // that packs the shape in the wrong order.
+    for (std::size_t d = 0; d < from_literal.rank(); d++) {
+        REQUIRE(from_vector.shape(d) == from_literal.shape(d));
+        REQUIRE(from_vector.stride(d) == from_literal.stride(d));
+    }
+}
+
+// The one that earns its place. checked_shape packs into a fixed MAX_RANK
+// array, and the obvious first draft of the span version -
+// std::copy(shape.begin(), shape.end(), result.begin()) - overruns it here,
+// before any check has run. That is a stack smash inside the function whose
+// entire job is rejecting bad shapes, and it happens in Release too.
+//
+// Prove this test works by deleting the rank check and watching it crash or
+// corrupt rather than throw.
+TEST_CASE("a runtime shape longer than MAX_RANK is rejected before it is copied", "[tensor]") {
+    const std::vector<std::size_t> too_long = {2, 2, 2, 2, 2};
+    REQUIRE(too_long.size() > MAX_RANK);
+
+    REQUIRE_THROWS_AS(Tensor(std::span<const std::size_t>{too_long}), std::invalid_argument);
+}
+
+TEST_CASE("a runtime shape with a zero extent is rejected", "[tensor]") {
+    const std::vector<std::size_t> has_zero = {3, 0};
+    REQUIRE_THROWS_AS(Tensor(std::span<const std::size_t>{has_zero}), std::invalid_argument);
+}
+
+TEST_CASE("an empty runtime shape is rejected", "[tensor]") {
+    const std::vector<std::size_t> empty;
+    REQUIRE_THROWS_AS(Tensor(std::span<const std::size_t>{empty}), std::invalid_argument);
+}
+
+TEST_CASE("permute takes a runtime dims list", "[tensor][view]") {
+    const Tensor t({2, 3, 4});
+    const std::vector<std::size_t> dims = {2, 0, 1};
+
+    const Tensor p = t.permute(std::span<const std::size_t>{dims});
+
+    REQUIRE(p.shape(0) == 4);
+    REQUIRE(p.shape(1) == 2);
+    REQUIRE(p.shape(2) == 3);
+    REQUIRE(p.stride(0) == t.stride(2));
+    REQUIRE(p.stride(1) == t.stride(0));
+    REQUIRE(p.stride(2) == t.stride(1));
+    REQUIRE(p.shares_storage_with(t));
+}
+
+// A repeated dim is a permutation only if you never check. Passing {0, 0} on a
+// rank-2 tensor gives the right rank and the right length, so a span path that
+// skipped the seen[] check would build a tensor with two dimensions aliasing
+// one axis and report no error.
+TEST_CASE("a runtime permute with a repeated dim is rejected", "[tensor][view]") {
+    const Tensor t({2, 3});
+    const std::vector<std::size_t> repeated = {0, 0};
+
+    REQUIRE_THROWS_AS(t.permute(std::span<const std::size_t>{repeated}), std::invalid_argument);
+}
+
+TEST_CASE("expand takes a runtime shape", "[tensor][view]") {
+    const Tensor t({1, 3});
+    const std::vector<std::size_t> shape = {4, 3};
+
+    const Tensor e = t.expand(std::span<const std::size_t>{shape});
+
+    REQUIRE(e.shape(0) == 4);
+    REQUIRE(e.stride(0) == 0); // the whole point of expand
+    REQUIRE(e.shape(1) == 3);
+    REQUIRE(e.stride(1) == 1);
+    REQUIRE(e.shares_storage_with(t));
+}
+
+TEST_CASE("a runtime expand of a dimension wider than 1 is rejected", "[tensor][view]") {
+    const Tensor t({2, 3});
+    const std::vector<std::size_t> shape = {4, 3};
+
+    REQUIRE_THROWS_AS(t.expand(std::span<const std::size_t>{shape}), std::invalid_argument);
+}
+
+TEST_CASE("reshape takes a runtime shape", "[tensor][view]") {
+    const Tensor t({2, 6});
+    const std::vector<std::size_t> shape = {3, 4};
+
+    const Tensor r = t.reshape(std::span<const std::size_t>{shape});
+
+    REQUIRE(r.shape(0) == 3);
+    REQUIRE(r.shape(1) == 4);
+    REQUIRE(r.stride(0) == 4);
+    REQUIRE(r.stride(1) == 1);
+    REQUIRE(r.shares_storage_with(t));
+}
+
+// reshape's contiguity check is the one that separates "forwards to the same
+// implementation" from "reimplemented next to it". A span path that only
+// compared element counts would accept this and hand back a tensor whose
+// strides describe a layout its buffer does not have.
+TEST_CASE("a runtime reshape of a transposed tensor is rejected", "[tensor][view]") {
+    const Tensor t({2, 6});
+    const Tensor transposed = t.transpose(0, 1);
+    REQUIRE_FALSE(transposed.is_contiguous());
+
+    const std::vector<std::size_t> shape = {3, 4};
+    REQUIRE_THROWS_AS(transposed.reshape(std::span<const std::size_t>{shape}),
+                      std::invalid_argument);
+}
+
+// The element-count check has to survive too, and it is a different check.
+TEST_CASE("a runtime reshape to a different element count is rejected", "[tensor][view]") {
+    const Tensor t({2, 6});
+    const std::vector<std::size_t> shape = {3, 5};
+
+    REQUIRE_THROWS_AS(t.reshape(std::span<const std::size_t>{shape}), std::invalid_argument);
 }

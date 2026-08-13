@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <initializer_list>
 #include <memory>
+#include <span>
 #include <stdexcept>
 #include <type_traits>
 
@@ -75,11 +76,40 @@ private:
 
 class Tensor {
 public:
+    /* -------------------------------------------------------------------- */
+    /* Runtime shapes                                                        */
+    /*                                                                       */
+    /* Four functions come in pairs - this constructor, permute, expand and  */
+    /* reshape - an initializer_list overload for literal call sites and a   */
+    /* std::span one for shapes only known at runtime.                       */
+    /*                                                                       */
+    /* std::initializer_list cannot be built at runtime: the compiler        */
+    /* synthesises its backing array at the call site, and nothing lets you  */
+    /* make one from a pointer and a length. A shape arriving from Python    */
+    /* has no other way in. std::span IS that pointer and length, non-owning,*/
+    /* binding from vector, array, C array or an initializer_list alike -    */
+    /* the C idiom of (const T *, size_t) with a type on it.                 */
+    /*                                                                       */
+    /* Validation lives in the span overload. The initializer_list one       */
+    /* forwards, so there is one copy of every check.                        */
+    /*                                                                       */
+    /* The pair is unambiguous permanently, not merely until span gains an   */
+    /* initializer_list constructor in C++26. List-initialisation considers  */
+    /* initializer_list constructors FIRST and stops once one is viable, so  */
+    /* Tensor{2,3} keeps picking that one whatever span acquires later; and  */
+    /* for a braced argument such as t.permute({0,1}) the conversion to      */
+    /* initializer_list is ranked by its elements - an exact match here -    */
+    /* while the one to span would be user-defined, which loses.             */
+    /* -------------------------------------------------------------------- */
+
     // Allocates a contiguous row-major tensor of the given shape, zeroed.
     //
     // Throws std::invalid_argument on rank 0, on rank above MAX_RANK, on any
     // zero-length dimension, and on a shape whose element count overflows.
     explicit Tensor(std::initializer_list<std::size_t> shape);
+
+    // Same contract, runtime shape. See the block above.
+    explicit Tensor(std::span<const std::size_t> shape);
 
     // No default constructor on purpose. An empty default-constructed state
     // means every accessor grows an is-it-valid branch, and the moved-from
@@ -162,6 +192,9 @@ public:
     // length, every dimension present, none twice.
     Tensor permute(std::initializer_list<std::size_t> dims) const;
 
+    // Same contract, runtime dims. See the runtime-shapes block above.
+    Tensor permute(std::span<const std::size_t> dims) const;
+
     // Narrows one dimension to [start, start + count). Strides are untouched;
     // only the offset moves and one extent shrinks. This is the operation
     // offset_ exists for.
@@ -184,6 +217,9 @@ public:
     // asked to change.
     Tensor expand(std::initializer_list<std::size_t> shape) const;
 
+    // Same contract, runtime shape. See the runtime-shapes block above.
+    Tensor expand(std::span<const std::size_t> shape) const;
+
     // Reinterprets the same elements under a new shape, with fresh row-major
     // strides. Requires the same element count.
     //
@@ -193,6 +229,9 @@ public:
     // mysteriously slow. Callers who want the copy write
     // .contiguous().reshape(...) and can see themselves paying for it.
     Tensor reshape(std::initializer_list<std::size_t> shape) const;
+
+    // Same contract, runtime shape. See the runtime-shapes block above.
+    Tensor reshape(std::span<const std::size_t> shape) const;
 
     // Returns a tensor with the same values in dense row-major order.
     //
@@ -247,6 +286,17 @@ private:
     // array can never be overrun by an over-long list.
     static std::array<std::size_t, MAX_RANK>
     checked_shape(std::initializer_list<std::size_t> shape);
+
+    // Same contract, runtime shape, and the one place every check lives: the
+    // four public span overloads all reach it.
+    //
+    // The order above is load-bearing, not stylistic. std::copy(shape.begin(),
+    // shape.end(), result.begin()) is the obvious first draft here and it
+    // overruns the MAX_RANK array on a rank-5 input before any check has run -
+    // in the function whose whole job is rejecting bad shapes, and in Release
+    // too. Reject the rank, then the extents, then pack.
+    static std::array<std::size_t, MAX_RANK>
+    checked_shape(std::span<const std::size_t> shape);
     static std::size_t numel_of(const std::array<std::size_t, MAX_RANK>& shape, std::size_t rank);
     static std::array<std::size_t, MAX_RANK> row_major_strides(const std::array<std::size_t, MAX_RANK>& shape, std::size_t rank);
 
