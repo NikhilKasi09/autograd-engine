@@ -421,3 +421,156 @@ TEST_CASE("gemm kernels match the reference on random shapes", "[gemm][.fuzz]") 
         }
     }
 }
+
+/* ------------------------------------------------------------------------ */
+/* Operand preconditions                                                     */
+/*                                                                           */
+/* The kernels take a raw pointer and one leading dimension per operand.     */
+/* That expresses stride(0) and nothing else, so rank must be 2 and the      */
+/* inner stride must be 1. Neither was checkable while operands were a       */
+/* Matrix, because a Matrix could not be anything else.                      */
+/*                                                                           */
+/* A rejecting wrapper leaves C untouched, so "was it rejected" is asked by  */
+/* checking C is still zero - the same observable contract the               */
+/* reference-magnitude guard above relies on.                                */
+/* ------------------------------------------------------------------------ */
+
+namespace {
+
+bool all_zero(const Tensor &t) {
+    for (size_t i = 0; i < t.numel(); i++) {
+        if (t.data()[i] != 0.0f) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Fills a contiguous tensor with 1, 2, 3, ... so that any kernel which does
+// run produces something visibly non-zero.
+void fill_counting(Tensor &t) {
+    for (size_t i = 0; i < t.numel(); i++) {
+        t.data()[i] = static_cast<float>(i + 1);
+    }
+}
+
+} // namespace
+
+TEST_CASE("gemm rejects an operand that is not rank 2", "[gemm]") {
+    const auto ke = GENERATE(from_range(kernels));
+
+    // Rank 3, and deliberately one whose first two extents ARE compatible with
+    // B: 2x3x4 reports shape(0)=2 and shape(1)=3, so the existing shape check
+    // accepts it and the kernel runs on a stride it was never given. It reads
+    // inside the allocation, so nothing crashes and nothing is sanitised - the
+    // result is simply wrong. Only a rank check catches this.
+    Tensor A3({2, 3, 4});
+    Tensor B({3, 5});
+    Tensor C({2, 5});
+    fill_counting(A3);
+    fill_counting(B);
+
+    INFO("kernel " << ke.name << ", rank-3 A");
+    ke.func(A3, B, C);
+    CHECK(all_zero(C));
+
+    // The case that isolates the rank check from the unit-stride check. A
+    // trailing extent of 1 gives {2,3,1} the strides {3,1,1}, so stride(1) is
+    // 1 and the stride check waves it through; the extents 2 and 3 are
+    // multiply-compatible with B, so the shape check waves it through too.
+    // Only rank() == 2 rejects this one.
+    //
+    // Rank 3 with a trailing 1 is a matrix mathematically, and this engine
+    // still says no: the caller reshapes. One rule, no special case in six
+    // kernels.
+    Tensor A31({2, 3, 1});
+    Tensor C31({2, 5});
+    fill_counting(A31);
+    REQUIRE(A31.stride(1) == 1);
+
+    INFO("kernel " << ke.name << ", rank-3 A with a trailing 1");
+    ke.func(A31, B, C31);
+    CHECK(all_zero(C31));
+
+    // Rank 1. In a release build this is already rejected, but for the wrong
+    // reason - shape(1) reads a stale zero out of the shape array and fails the
+    // multiply-compatibility test. In a debug build the same call trips the
+    // assert in Tensor::shape and aborts. Both are why the rank check has to
+    // come first.
+    Tensor A1({6});
+    Tensor B1({6, 2});
+    Tensor C1({1, 2});
+    fill_counting(A1);
+    fill_counting(B1);
+
+    INFO("kernel " << ke.name << ", rank-1 A");
+    ke.func(A1, B1, C1);
+    CHECK(all_zero(C1));
+}
+
+TEST_CASE("gemm rejects an operand whose inner stride is not 1", "[gemm]") {
+    const auto ke = GENERATE(from_range(kernels));
+
+    Tensor base({2, 3});
+    fill_counting(base);
+
+    // 3x2 with strides {1, 3}. Every extent lines up with B and C, so the
+    // shape check passes; only the stride check can reject it. Left alone, the
+    // kernel reads it with lda = stride(0) = 1, treating a column-major view as
+    // if it were row-major.
+    const Tensor At = base.transpose(0, 1);
+    REQUIRE(At.stride(1) == 3);
+
+    Tensor B({2, 4});
+    Tensor C({3, 4});
+    fill_counting(B);
+
+    INFO("kernel " << ke.name);
+    ke.func(At, B, C);
+    CHECK(all_zero(C));
+}
+
+TEST_CASE("gemm accepts a sliced operand whose row stride exceeds its width", "[gemm]") {
+    const auto ke = GENERATE(from_range(kernels));
+
+    // The case the preconditions must NOT reject, and the first test in this
+    // project to exercise the stride >= cols invariant the code has carried
+    // since phase 1. A is the first three columns of a 4x6 tensor: rank 2 and
+    // unit inner stride, but stride(0) is 6 against a width of 3.
+    Tensor wide({4, 6});
+    for (size_t i = 0; i < 24; i++) {
+        wide.data()[i] = static_cast<float>(i);
+    }
+
+    const Tensor A = wide.slice(1, 0, 3);
+    REQUIRE(A.shape(0) == 4);
+    REQUIRE(A.shape(1) == 3);
+    REQUIRE(A.stride(0) == 6); // wider than the operand itself
+    REQUIRE(A.stride(1) == 1);
+
+    //  A = [  0  1  2 ]      B = [ 1 0 ]      A*B = [  2  3 ]
+    //      [  6  7  8 ]          [ 0 1 ]            [ 14 15 ]
+    //      [ 12 13 14 ]          [ 1 1 ]            [ 26 27 ]
+    //      [ 18 19 20 ]                             [ 38 39 ]
+    Tensor B({3, 2});
+    B.data()[0] = 1; B.data()[1] = 0;
+    B.data()[2] = 0; B.data()[3] = 1;
+    B.data()[4] = 1; B.data()[5] = 1;
+
+    Tensor C({4, 2});
+
+    const char *why = restriction_violated(ke.restrictions, 4, 2, 3, ke.nthreads);
+    if (why != nullptr) {
+        SKIP(ke.name << " restricted here: " << why);
+    }
+
+    ke.func(A, B, C);
+
+    // Every value is exactly representable, so this compares with ==.
+    static const float expected[8] = {2, 3, 14, 15, 26, 27, 38, 39};
+    INFO("kernel " << ke.name);
+    for (size_t i = 0; i < 8; i++) {
+        INFO("at flat index " << i);
+        CHECK(C.data()[i] == expected[i]);
+    }
+}
