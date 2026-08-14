@@ -1,33 +1,4 @@
 // The pybind11 surface.
-//
-// Two things live here at once during phase 4: the real Tensor binding being
-// built up step by step, and the phase 2 throwaway (add, gemm-over-numpy) that
-// the existing NumPy cross-check still runs on. The throwaway goes at step 6,
-// once the real gemm binding has a green test of its own.
-//
-// OWNERSHIP - the decision the rest of this file depends on.
-//
-// Tensor is bound with NO holder argument, which is not an oversight. Tensor
-// is already its own holder: a value type whose copy constructor is a refcount
-// bump on shared_ptr<Storage>. A view returned by value is move-constructed
-// into the new Python object and carries an independent claim on the buffer,
-// so the base can be collected while the view lives.
-//
-// What follows from that, as rules rather than case-by-case judgement:
-//   - no py::keep_alive on the view methods. Redundant, and it builds a
-//     base <-> view cycle for the cyclic collector to break.
-//   - no bound function returns Tensor& or const Tensor&. All by value.
-//   - no bound function takes std::unique_ptr<Tensor>. pybind11 3.x defaults
-//     to smart_holder, which supports disowning, so such a parameter would
-//     leave a zombie Python object behind. Take const Tensor& / Tensor&.
-//   - Storage is never bound. shares_storage_with answers the only question
-//     that would motivate it, and answers it better than comparing data(),
-//     which false-negatives on two views at different offsets.
-//   - do not write py::classh or py::smart_holder. That is the 2.x spelling
-//     for opting in, and naming it here would imply the holder is doing work.
-//
-// GIL: held throughout this step. It is released only where C++ threads
-// actually run, which is gemm, at step 5.
 
 #include "gemm.hpp"
 #include "tensor.hpp"
@@ -249,17 +220,10 @@ race. This is the same statement tensor.hpp already makes about the C++ side.
     // comment that will not be updated.
     m.attr("MAX_RANK") = MAX_RANK;
 
-    /* --------------------------------------------------------------------- */
-    /* Tensor                                                                 */
-    /*                                                                        */
-    /* Names mirror the C++ ones: rank not ndim, numel not size. _core is the */
-    /* faithful mirror, and numpy-shaped names belong on phase 5's graph      */
-    /* Tensor. One name per concept keeps the two layers greppable.           */
-    /*                                                                        */
-    /* py::buffer_protocol() is registered here but def_buffer arrives at     */
-    /* step 3, so np.asarray(t) raises BufferError until then - loud, which   */
-    /* is what a scaffold should be.                                          */
-    /* --------------------------------------------------------------------- */
+
+    // Tensor
+
+
     py::class_<Tensor>(m, "Tensor", py::buffer_protocol())
 
         // Every shape argument is a std::vector, converted from any Python
@@ -317,12 +281,9 @@ race. This is the same statement tensor.hpp already makes about the C++ side.
                 "ValueError otherwise: writing through an expanded view would have\n"
                 "several logical elements aliasing one float.")
 
-        /* ----------------------------------------------------------------- */
-        /* Views. All six share storage and return a new Tensor.              */
-        /*                                                                    */
-        /* No py::keep_alive on any of them - see the ownership note at the   */
-        /* top of the file. The returned Tensor holds its own claim.          */
-        /* ----------------------------------------------------------------- */
+
+        // Views. All six share storage and return a new Tensor.        
+
 
         .def("transpose", [](const Tensor &t, std::size_t d0, std::size_t d1) -> Tensor {
                  return t.transpose(d0,d1);
@@ -365,10 +326,52 @@ race. This is the same statement tensor.hpp already makes about the C++ side.
                 return t.contiguous();
              }, "Same values in dense row-major order. Returns a handle onto the\n"
                 "same buffer when already contiguous, and only copies otherwise.")
+        
+        
+        
+        // Numpy
 
-        /* ----------------------------------------------------------------- */
-        /* Python protocol                                                    */
-        /* ----------------------------------------------------------------- */
+
+        // Exports this tensor's memory under PEP 3118, so np.asarray(t) is a view
+
+        .def_buffer([](Tensor &t) -> py::buffer_info {
+            std::vector<py::ssize_t> shape(t.rank());
+            std::vector<py::ssize_t> strides(t.rank());
+            bool readonly = false;
+
+            for (std::size_t i = 0; i < t.rank(); i++){
+                shape[i] = t.shape(i);
+                strides[i] = t.stride(i) * sizeof(float);
+                if (strides[i] == 0 ){
+                    readonly = true;
+                }
+            }
+
+            return py::buffer_info(t.data(), sizeof(float), py::format_descriptor<float>::format(), t.rank(), shape, strides, readonly);
+        })
+
+        // Explicit copy out: fresh, owning, C-contiguous, base is None.
+
+        .def("to_numpy", [](const Tensor &t) -> py::array_t<float> {
+
+            Tensor c = t.contiguous();
+
+            std::vector<py::ssize_t> shape(c.rank());
+            for (std::size_t d = 0; d < c.rank(); d++) {
+                shape[d] = c.shape(d);
+            }
+
+            py::array_t<float> result(shape);
+            std::memcpy(result.mutable_data(), c.data(), c.numel() * sizeof(float));
+
+            return result;
+
+        },
+             "Copy to a new C-contiguous numpy array.\n\n"
+             "np.asarray(t) is the zero-copy view; this is the copy, and the\n"
+             "distinction is visible at the call site on purpose.")
+
+        // Python protocol                                                    
 
         .def("__repr__", &tensor_repr)
 
@@ -420,6 +423,55 @@ race. This is the same statement tensor.hpp already makes about the C++ side.
     /* caller rebuilds shape tuples by hand and eventually gets one wrong for  */
     /* a transposed input.                                                    */
     /* --------------------------------------------------------------------- */
+
+    // Copy in. Every input is a copy, and phase 4 does not change that: there
+    // is no constructor over externally owned memory, and adding one would
+    // need a Storage that does not own its buffer and cannot promise 32-byte
+    // base alignment - which is the one thing the AVX2 path assumes. That is a
+    // phase 9 decision at the earliest.
+    //
+    // NpArray is c_style | forcecast, so a float64 or Fortran-ordered array is
+    // converted rather than rejected, and the result is always contiguous.
+    //
+    // Validate in this order, and report each separately:
+    //   1. ndim in [1, MAX_RANK]. Distinguish rank 0 ("a scalar is shape (1,)")
+    //      from rank > MAX_RANK, because they are different mistakes.
+    //   2. no zero extent.
+    // Then build the shape vector from arr.shape(), construct through the span
+    // overload, and do ONE FLAT memcpy of numel * sizeof(float).
+    //
+    // Not a row loop. The destination is freshly constructed and therefore
+    // always contiguous, so the row-stride walk in tensor_from_numpy above is
+    // both unnecessary and hardcoded to rank 2. Do not copy it down here.
+    //
+    // GIL stays held: forcecast may allocate a converted array, which is a
+    // Python operation, and the memcpy is short enough that releasing around
+    // it would be an optimisation with no measurement behind it.
+    m.def("from_numpy", [](const NpArray &arr) -> Tensor {
+              if (arr.ndim() < 1 || arr.ndim() > static_cast<py::ssize_t>(MAX_RANK)) {
+                  throw std::invalid_argument("Error: Rank should be in [1, MAX_RANK].");
+              }
+
+              for (py::ssize_t d = 0; d < arr.ndim(); d++) {
+                  if (arr.shape(d) == 0) {
+                      throw std::invalid_argument("Error: every extent must be non-zero.");
+                  }
+              }
+
+              std::vector<std::size_t> shape(static_cast<std::size_t>(arr.ndim()));
+              for (py::ssize_t d = 0; d < arr.ndim(); d++) {
+                  shape[static_cast<std::size_t>(d)] = static_cast<std::size_t>(arr.shape(d));
+              }
+
+              Tensor result{std::span<const std::size_t>(shape)};
+              std::memcpy(result.data(), arr.data(), result.numel() * sizeof(float));
+
+              return result;
+          }, py::arg("array"),
+          "Copy a numpy array into a new Tensor.\n\n"
+          "Accepts any dtype and either memory order; the data is converted to\n"
+          "contiguous float32 on the way in. Rank must be in [1, MAX_RANK] and\n"
+          "no extent may be zero, or ValueError.");
 
     m.def("zeros", [](const std::vector<std::size_t> &shape) -> Tensor {
             return Tensor(std::span<const std::size_t>(shape));
