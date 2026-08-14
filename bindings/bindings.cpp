@@ -415,38 +415,8 @@ race. This is the same statement tensor.hpp already makes about the C++ side.
                  return t.clone();
              }, py::arg("memo"), "Deep: fresh storage, same values. Equivalent to clone().");
 
-    /* --------------------------------------------------------------------- */
-    /* Factories                                                              */
-    /*                                                                        */
-    /* The only allocation policy that belongs next to the type. Everything    */
-    /* else in _core takes its output as a parameter, so without these every   */
-    /* caller rebuilds shape tuples by hand and eventually gets one wrong for  */
-    /* a transposed input.                                                    */
-    /* --------------------------------------------------------------------- */
+    // Factories                                                             
 
-    // Copy in. Every input is a copy, and phase 4 does not change that: there
-    // is no constructor over externally owned memory, and adding one would
-    // need a Storage that does not own its buffer and cannot promise 32-byte
-    // base alignment - which is the one thing the AVX2 path assumes. That is a
-    // phase 9 decision at the earliest.
-    //
-    // NpArray is c_style | forcecast, so a float64 or Fortran-ordered array is
-    // converted rather than rejected, and the result is always contiguous.
-    //
-    // Validate in this order, and report each separately:
-    //   1. ndim in [1, MAX_RANK]. Distinguish rank 0 ("a scalar is shape (1,)")
-    //      from rank > MAX_RANK, because they are different mistakes.
-    //   2. no zero extent.
-    // Then build the shape vector from arr.shape(), construct through the span
-    // overload, and do ONE FLAT memcpy of numel * sizeof(float).
-    //
-    // Not a row loop. The destination is freshly constructed and therefore
-    // always contiguous, so the row-stride walk in tensor_from_numpy above is
-    // both unnecessary and hardcoded to rank 2. Do not copy it down here.
-    //
-    // GIL stays held: forcecast may allocate a converted array, which is a
-    // Python operation, and the memcpy is short enough that releasing around
-    // it would be an optimisation with no measurement behind it.
     m.def("from_numpy", [](const NpArray &arr) -> Tensor {
               if (arr.ndim() < 1 || arr.ndim() > static_cast<py::ssize_t>(MAX_RANK)) {
                   throw std::invalid_argument("Error: Rank should be in [1, MAX_RANK].");
