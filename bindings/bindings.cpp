@@ -1,22 +1,49 @@
-// Minimal pybind11 surface, deliberately throwaway.
+// The pybind11 surface.
 //
-// This exists so the kernels can be checked against NumPy with np.allclose,
-// which the C++ harness cannot do: it compares against its own reference, and
-// two implementations agreeing is weaker evidence than agreeing with a third
-// party nobody involved wrote.
+// Two things live here at once during phase 4: the real Tensor binding being
+// built up step by step, and the phase 2 throwaway (add, gemm-over-numpy) that
+// the existing NumPy cross-check still runs on. The throwaway goes at step 6,
+// once the real gemm binding has a green test of its own.
 //
-// Roadmap phase 4 replaces all of this with the real Tensor binding. Do not
-// grow it - if something wants a richer API, that is phase 4 arriving early.
+// OWNERSHIP - the decision the rest of this file depends on.
+//
+// Tensor is bound with NO holder argument, which is not an oversight. Tensor
+// is already its own holder: a value type whose copy constructor is a refcount
+// bump on shared_ptr<Storage>. A view returned by value is move-constructed
+// into the new Python object and carries an independent claim on the buffer,
+// so the base can be collected while the view lives.
+//
+// What follows from that, as rules rather than case-by-case judgement:
+//   - no py::keep_alive on the view methods. Redundant, and it builds a
+//     base <-> view cycle for the cyclic collector to break.
+//   - no bound function returns Tensor& or const Tensor&. All by value.
+//   - no bound function takes std::unique_ptr<Tensor>. pybind11 3.x defaults
+//     to smart_holder, which supports disowning, so such a parameter would
+//     leave a zombie Python object behind. Take const Tensor& / Tensor&.
+//   - Storage is never bound. shares_storage_with answers the only question
+//     that would motivate it, and answers it better than comparing data(),
+//     which false-negatives on two views at different offsets.
+//   - do not write py::classh or py::smart_holder. That is the 2.x spelling
+//     for opting in, and naming it here would imply the holder is doing work.
+//
+// GIL: held throughout this step. It is released only where C++ threads
+// actually run, which is gemm, at step 5.
 
 #include "gemm.hpp"
 #include "tensor.hpp"
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h> // std::vector <-> Python sequence. There is NO
+                          // std::span caster, which is why every shape-taking
+                          // lambda below takes a vector and builds the span at
+                          // the call site.
 
 #include <cstring>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace py = pybind11;
 
@@ -115,10 +142,304 @@ NpArray gemm(const NpArray &a, const NpArray &b, const std::string &kernel) {
     return numpy_from_tensor(C);
 }
 
+
+// Tensor binding helpers                                                   
+
+// Packs rank() extents into a tuple. Tensor has no whole-shape accessor on
+// purpose - one would allocate and would overload confusingly against
+// shape(dim) - so this aggregation is binding-local.
+py::tuple shape_tuple(const Tensor &t) {
+    
+    py::tuple result(t.rank());
+
+    for(std::size_t i = 0; i < t.rank(); i++){
+        result[i] = t.shape(i);
+    }
+
+    return result;
+}
+
+// Strides IN ELEMENTS, matching Tensor::stride. NumPy's .strides is in BYTES.
+
+py::tuple strides_tuple(const Tensor &t) {
+    
+    py::tuple result(t.rank());
+
+    for(std::size_t i = 0; i < t.rank(); i++){
+        result[i] = t.stride(i);
+    }
+
+    return result;
+}
+
+// Resolves a Python index expression to an offset in floats from data().
+
+std::size_t index_offset(const Tensor &t, const py::object &idx) {
+    std::vector<py::ssize_t> indices;
+
+    if (py::isinstance<py::tuple>(idx)) {
+        py::tuple t_idx = idx.cast<py::tuple>();
+        for (auto elem : t_idx) {
+            indices.push_back(elem.cast<py::ssize_t>());
+        }
+    } else {
+        indices.push_back(idx.cast<py::ssize_t>());
+    }
+
+    if (indices.size() != t.rank()) {
+        throw std::out_of_range("Error: wrong number of indices, must equal rank of tensor.");
+    }
+
+    std::size_t offset = 0;
+    for (std::size_t d = 0; d < indices.size(); d++) {
+        py::ssize_t i = indices[d];
+        py::ssize_t extent = static_cast<py::ssize_t>(t.shape(d));
+
+        if (i < 0) {
+            i += extent;
+        }
+
+        if (i < 0 || i >= extent) {
+            throw std::out_of_range("index out of range");
+        }
+
+        offset += static_cast<std::size_t>(i) * t.stride(d);
+    }
+
+    return offset;
+}
+
+// "Tensor(shape=(2, 3), strides=(3, 1), contiguous=True)" or similar. Values
+// are deliberately not printed: a repr that walks a 4 MB buffer is a trap in a
+// debugger, and to_numpy() at step 3 is the explicit way to see them.
+std::string tensor_repr(const Tensor &t) {
+    std::string shape_str = py::repr(shape_tuple(t)).cast<std::string>();
+    std::string strides_str = py::repr(strides_tuple(t)).cast<std::string>();
+    std::string contig_str = t.is_contiguous() ? "True" : "False";
+
+    return "Tensor(shape=" + shape_str + ", strides=" + strides_str +
+           ", contiguous=" + contig_str + ")";
+}
+
 } // namespace
 
 PYBIND11_MODULE(_core, m) {
-    m.doc() = "autograd engine C++ core (phase 2: GEMM only)";
+    m.doc() = R"(autograd engine C++ core.
+
+Tensor storage and forward kernels. No graph logic and no gradient logic - the
+autograd DAG lives in Python, from phase 5.
+
+Errors. C++ exceptions arrive as pybind11's built-in mappings; there is no
+custom exception hierarchy, and if the graph layer ever wants a ShapeError it
+can subclass in Python.
+
+    std::invalid_argument  -> ValueError    every Tensor view, every op
+    std::out_of_range      -> IndexError    index bounds checks
+    std::bad_alloc         -> MemoryError   Storage allocation failure
+    std::length_error      -> ValueError    overflow paths
+    std::logic_error       -> RuntimeError  an unimplemented scaffold stub
+
+Threading. Tensor copies share a buffer and nothing protects the floats. The
+GIL used to make that moot; from phase 4 the gemm binding releases it, so two
+Python threads running gemm over tensors that share storage is a genuine data
+race. This is the same statement tensor.hpp already makes about the C++ side.
+)";
+
+    // Lets a test assert the rank limit rather than hardcoding 4 next to a
+    // comment that will not be updated.
+    m.attr("MAX_RANK") = MAX_RANK;
+
+    /* --------------------------------------------------------------------- */
+    /* Tensor                                                                 */
+    /*                                                                        */
+    /* Names mirror the C++ ones: rank not ndim, numel not size. _core is the */
+    /* faithful mirror, and numpy-shaped names belong on phase 5's graph      */
+    /* Tensor. One name per concept keeps the two layers greppable.           */
+    /*                                                                        */
+    /* py::buffer_protocol() is registered here but def_buffer arrives at     */
+    /* step 3, so np.asarray(t) raises BufferError until then - loud, which   */
+    /* is what a scaffold should be.                                          */
+    /* --------------------------------------------------------------------- */
+    py::class_<Tensor>(m, "Tensor", py::buffer_protocol())
+
+        // Every shape argument is a std::vector, converted from any Python
+        // sequence by pybind11/stl.h, and the span is built at the call:
+        //     Tensor(std::span<const std::size_t>{shape})
+        // There is no std::span type caster - stl.h casts vector, array and
+        // string_view but not span, and one would carry the lifetime problem
+        // every view-type caster has. The cost is one copy of a <=4 element
+        // vector per view construction, which is nothing beside a GEMM.
+        .def(py::init([](const std::vector<std::size_t> &shape) -> Tensor {
+                 return Tensor(std::span<const std::size_t>(shape));
+             }),
+             py::arg("shape"),
+             "Allocate a zeroed, contiguous row-major tensor.\n\n"
+             "Rank must be in [1, MAX_RANK] and no extent may be zero: there is\n"
+             "no rank-0 tensor (a scalar is shape (1,)) and no empty tensor.\n"
+             "Raises ValueError otherwise.")
+
+        .def_property_readonly("shape", &shape_tuple, "Extents, as a tuple.")
+
+        .def_property_readonly("strides", &strides_tuple,
+                               "Strides IN ELEMENTS, matching Tensor::stride in C++.\n"
+                               "NumPy's .strides is in BYTES - the two differ by 4.")
+
+        .def("rank", [](const Tensor &t) -> std::size_t {
+                 return t.rank();
+             }, "Number of dimensions. At least 1, at most MAX_RANK.")
+
+        .def("numel", [](const Tensor &t) -> std::size_t {
+                 return t.numel();
+             }, "Product of the shape. Not the size of the buffer behind it:\n"
+                "a slice has fewer elements than the storage it views.")
+
+        .def("is_contiguous", [](const Tensor &t) -> bool {
+                 return t.is_contiguous();
+             }, "True when the elements are dense row-major.")
+
+        .def("shares_storage_with", [](const Tensor &t, const Tensor &other) -> bool {
+                 return t.shares_storage_with(other);
+             }, py::arg("other"),
+             "True when both handles refer to the same buffer.\n\n"
+             "This is what a test should assert to prove a view is a view.\n"
+             "Comparing addresses instead false-negatives on two views sitting\n"
+             "at different offsets in one buffer.")
+
+        .def("clone", [](const Tensor &t) -> Tensor {
+                 return t.clone();
+             }, "Deep copy: fresh storage, contiguous, same values. Reads through\n"
+                "this tensor's strides, so cloning a transposed view materialises\n"
+                "the transpose.")
+
+        .def("zero_", [](Tensor &t) -> void {
+                 return t.zero();
+             }, "Fill with zeros in place. Requires a contiguous tensor and raises\n"
+                "ValueError otherwise: writing through an expanded view would have\n"
+                "several logical elements aliasing one float.")
+
+        /* ----------------------------------------------------------------- */
+        /* Views. All six share storage and return a new Tensor.              */
+        /*                                                                    */
+        /* No py::keep_alive on any of them - see the ownership note at the   */
+        /* top of the file. The returned Tensor holds its own claim.          */
+        /* ----------------------------------------------------------------- */
+
+        .def("transpose", [](const Tensor &t, std::size_t d0, std::size_t d1) -> Tensor {
+                 return t.transpose(d0,d1);
+             }, py::arg("d0"), py::arg("d1"),
+             "Swap two dimensions. Nothing moves in memory, so the result is\n"
+             "almost never contiguous. Raises ValueError on a bad dimension.")
+
+        .def("permute", [](const Tensor &t, const std::vector<std::size_t> &dims) -> Tensor {
+                 return t.permute(std::span<const std::size_t>(dims));
+             }, py::arg("dims"),
+             "Reorder dimensions: result dimension i takes its extent and stride\n"
+             "from dims[i]. Raises ValueError unless dims is exactly a\n"
+             "permutation of range(rank()).")
+
+        .def("slice", [](const Tensor &t, std::size_t dim, std::size_t start, std::size_t count) -> Tensor {
+                 return t.slice(dim, start, count);
+             }, py::arg("dim"), py::arg("start"), py::arg("count"),
+             "Narrow one dimension to [start, start + count). Strides are\n"
+             "untouched; only the offset moves. This is the operation that\n"
+             "produces a row stride wider than the row, which is what the GEMM\n"
+             "kernels' leading-dimension handling exists for.")
+
+        .def("expand", [](const Tensor &t, const std::vector<std::size_t> &shape) -> Tensor {
+                 return t.expand(std::span<const std::size_t>(shape));
+             }, py::arg("shape"),
+             "Broadcast: any extent-1 dimension may stretch to any extent and\n"
+             "gets stride 0. Rank is unchanged and every other extent must match.\n\n"
+             "The result must never be written through - several logical elements\n"
+             "alias one float. From step 3 numpy sees it as read-only.")
+
+        .def("reshape", [](const Tensor &t, const std::vector<std::size_t> &shape) -> Tensor {
+                 return t.reshape(std::span<const std::size_t>(shape));
+             }, py::arg("shape"),
+             "Reinterpret the same elements under a new shape.\n\n"
+             "Raises ValueError on a non-contiguous tensor rather than silently\n"
+             "copying, so one function never has two performance profiles. Write\n"
+             ".contiguous().reshape(...) and see yourself paying for it.")
+
+        .def("contiguous", [](const Tensor &t) -> Tensor {
+                return t.contiguous();
+             }, "Same values in dense row-major order. Returns a handle onto the\n"
+                "same buffer when already contiguous, and only copies otherwise.")
+
+        /* ----------------------------------------------------------------- */
+        /* Python protocol                                                    */
+        /* ----------------------------------------------------------------- */
+
+        .def("__repr__", &tensor_repr)
+
+        .def("__getitem__", [](const Tensor &t, const py::object &index) -> float {
+                 return t.data()[index_offset(t, index)];
+             }, py::arg("index"),
+             "Read one element. t[i, j] on a rank-2, t[i] on a rank-1.\n\n"
+             "Every index is bounds-checked in every build, unlike C++\n"
+             "operator(), which checks only arity and only in debug. Negative\n"
+             "indices count from the end. Partial indexing raises - use slice().")
+
+        .def("__setitem__", [](Tensor &t, const py::object &index, float val) -> void {
+                 for (std::size_t d = 0; d < t.rank(); d++) {
+                     if (t.stride(d) == 0) {
+                         throw std::invalid_argument(
+                             "cannot write through an expanded tensor: dimension " +
+                             std::to_string(d) +
+                             " has stride 0, so one store would alias several "
+                             "elements. Call .contiguous() first.");
+                     }
+                 }
+
+                 t.data()[index_offset(t, index)] = val;
+             }, py::arg("index"), py::arg("value"),
+             "Write one element. Same indexing rules as __getitem__.\n\n"
+             "Raises ValueError on an expanded tensor - any dimension with\n"
+             "stride 0 - because one store would alias several elements.")
+
+        // Copy is SHALLOW in C++ and stays shallow here. That is the single
+        // most surprising fact about this type, and Python is where someone
+        // will get bitten by it, so both halves are bound with the asymmetry
+        // stated rather than left in the header.
+        .def("__copy__", [](const Tensor &t) -> Tensor {
+                 return t;
+             }, "Shallow: a second handle onto the same buffer. copy.deepcopy is\n"
+                "the one that copies the floats.")
+
+        // The memo dict is not optional. copy.deepcopy always passes it, and a
+        // one-parameter binding raises TypeError that reads like a Tensor bug.
+        .def("__deepcopy__", [](const Tensor &t, const py::dict &) -> Tensor {
+                 return t.clone();
+             }, py::arg("memo"), "Deep: fresh storage, same values. Equivalent to clone().");
+
+    /* --------------------------------------------------------------------- */
+    /* Factories                                                              */
+    /*                                                                        */
+    /* The only allocation policy that belongs next to the type. Everything    */
+    /* else in _core takes its output as a parameter, so without these every   */
+    /* caller rebuilds shape tuples by hand and eventually gets one wrong for  */
+    /* a transposed input.                                                    */
+    /* --------------------------------------------------------------------- */
+
+    m.def("zeros", [](const std::vector<std::size_t> &shape) -> Tensor {
+            return Tensor(std::span<const std::size_t>(shape));
+          }, py::arg("shape"), "Zeroed contiguous tensor. Same as Tensor(shape).");
+
+    m.def("zeros_like", [](const Tensor &t) -> Tensor {
+            std::vector<std::size_t> shape(t.rank());
+            for (std::size_t d = 0; d < t.rank(); d++) {
+                shape[d] = t.shape(d);
+            }
+            return Tensor(std::span<const std::size_t>(shape));
+          }, py::arg("t"),
+          "Zeroed CONTIGUOUS tensor with t's shape - not t's strides.\n\n"
+          "That is exactly what an out-parameter needs, and it is why passing a\n"
+          "transposed tensor here still gives you a legal output buffer.");
+
+    /* --------------------------------------------------------------------- */
+    /* Phase 2 throwaway. Retired at step 6, once the real gemm binding is     */
+    /* green. Do not grow either of these.                                    */
+    /* --------------------------------------------------------------------- */
 
     m.def("add", [](double a, double b) { return a + b; }, py::arg("a"), py::arg("b"),
           "Add two numbers. Toolchain smoke test, retired in phase 4.");
