@@ -15,8 +15,11 @@ No BLAS library is used anywhere. Writing the kernel is the point.
 ## Where it is now
 
 The GEMM library is finished, handles arbitrary shapes, and has been ported
-from C to C++. The tensor type it runs on is finished too. The autograd half
-has not been started yet.
+from C to C++. The tensor type it runs on is finished too, and it is now
+exposed to Python: the tensor, its views, the elementwise ops and all six GEMM
+kernels are callable from there, sharing memory with NumPy rather than copying
+through it. The autograd half — the graph, the backward pass — has not been
+started yet.
 
 The port replaced `posix_memalign`/`free` with RAII storage that owns its
 aligned buffer, pthreads with `std::jthread`, the Makefile with CMake, and the
@@ -190,6 +193,70 @@ away from it, which is fourteen times the tolerance used everywhere else here.
 Gradient checking would have reported that as a broken gradient rather than a
 broken reduction, which is an evening nobody gets back.
 
+## The Python surface
+
+`autograd._core` exposes the tensor type and the forward kernels. No graph
+logic and no gradient logic — that half is Python, and it starts at phase 5.
+
+```python
+from autograd import _core
+import numpy as np
+
+A = _core.from_numpy(np.random.rand(256, 256).astype(np.float32))
+B = _core.from_numpy(np.random.rand(256, 256).astype(np.float32))
+C = _core.zeros([256, 256])
+
+_core.gemm(A, B, C, "tiled_simd")   # C += A @ B
+np.asarray(C)                       # a view, not a copy
+```
+
+Names mirror the C++ ones — `rank` not `ndim`, `numel` not `size` — so the two
+layers stay greppable. Ops take their output as a parameter and return `None`,
+matching the C++ signatures rather than reading like torch. That is deliberate:
+`C += A*B` is the kernels' contract, `add_into` exists because a tensor used
+twice in a graph collects two gradient contributions, and a wrapper that
+allocated and zeroed a fresh output would throw both away. Phase 5's graph
+allocates its own outputs anyway, so the convenience would have bought one line
+and cost a rebuild every time the graph layer changed its mind.
+
+**Tensors share memory with NumPy.** `np.asarray(t)` is a view, because a
+`Tensor` and an `ndarray` describe memory the same way — pointer, shape,
+strides — so the buffer protocol can hand one to the other directly. A
+transposed or sliced tensor crosses the boundary still being a view. Strides go
+across in bytes where `Tensor::stride` counts elements, which is the one
+conversion in the whole layer that fails silently if you get it wrong: NumPy
+reads the right buffer with the wrong step and returns the right values in the
+wrong order. `to_numpy()` and `from_numpy()` are the explicit copies, named
+separately so the call site shows which one is being paid for.
+
+An expanded tensor is exported read-only. Stride 0 means several logical
+elements alias one float, so a single store would land in four places at once;
+C++ blocks that by requiring contiguity on every mutating path, and the
+read-only flag is what carries the same rule to NumPy.
+
+**Two things the C++ side does silently, the binding does not.** A bad operand
+makes the GEMM wrappers print to stderr and return with `C` untouched — right
+for the Catch2 harness, whose magnitude guard depends on it, and a wrong answer
+with no signal from Python. The binding calls `gemm_check_shapes` itself and
+raises, so the accept/reject decision still lives in one place. And `C` sharing
+storage with `A` or `B` is refused outright: the inner loops use `restrict`, so
+overlap is undefined rather than slow, which is a fine contract between a C++
+author and themselves and a segfault by typo from Python.
+
+### The transpose cost, and why there is no `transa`
+
+`gemm` requires unit inner stride on all three operands. A row stride wider
+than the row is fine — that is what a slice produces, and the leading-dimension
+handling exists for it — but a transposed operand is not, so it has to be
+materialised with `.contiguous()` first.
+
+Phase 6 will feel this. Backward wants `Xᵀ @ dY` and `dY @ Wᵀ`, so every
+backprop GEMM pays an allocation and a full copy, per layer, per step. BLAS
+solves it with `transa`/`transb` flags threaded through the call, which lets
+the kernel walk the operand in the other order instead of rewriting it. That is
+not hard to add, but doing it after the graph exists means touching every call
+site in it, so it is written down here rather than discovered in a profile.
+
 ## Building
 
 ```bash
@@ -276,7 +343,17 @@ Two further checks the harness cannot make on its own:
 - **NumPy.** The reference implementation and the kernels were written by the
   same person on the same assumptions, so agreement between them is weaker
   evidence than it looks. `pytest tests/python` checks `np.allclose` against
-  `a @ b` over 12 shapes and all six kernels.
+  `a @ b` over 12 shapes and all six kernels, each run twice — zeroed and
+  prefilled — so the Python layer keeps the `+=` distinction the C++ harness
+  makes.
+
+The Python suite carries two tests aimed at the binding rather than the
+kernels, since the Catch2 suite already covers those. One hands `add` a
+transposed operand and compares elementwise: a binding that "helpfully" called
+`.contiguous()` on its inputs would give correct values everywhere and quietly
+delete the stride-general reads, and nothing else would notice. The other runs
+GEMM on an 8x16 sliced to 8x8 — a row stride of 16 with unit inner stride,
+which must be accepted — for the same reason.
 
 The tensor and op tests make up the rest of that count. The ones that earn
 their place are the ones handing an op a transposed or broadcast input, since
@@ -293,7 +370,7 @@ is what actually catches those.
 - [x] Generalise the GEMM library to arbitrary M, N and K
 - [x] Port to C++, CMake, Catch2
 - [x] Tensor type: shape, strides, views, elementwise ops
-- [ ] pybind11 bindings
+- [x] pybind11 bindings
 - [ ] Autograd graph and `backward()`
 - [ ] Backward kernels
 - [ ] Gradient checking against finite differences and PyTorch

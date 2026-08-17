@@ -1,8 +1,7 @@
 """The GEMM binding: C += A @ B over Tensor operands.
 
-Written before the binding, so these fail on a fresh scaffold. Replaces
-test_gemm_numpy.py, which drives the phase 2 throwaway; that file goes at
-step 6 once this one is green.
+Replaced test_gemm_numpy.py, which drove the phase 2 throwaway binding over
+raw numpy arrays. The shape table is carried over from it unchanged.
 
 Two properties are carried over from the C++ harness deliberately, because
 losing either would make the suite look thorough while proving less:
