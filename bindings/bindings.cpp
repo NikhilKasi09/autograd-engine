@@ -1,6 +1,7 @@
 // The pybind11 surface.
 
 #include "gemm.hpp"
+#include "gemm_internal.hpp"
 #include "tensor.hpp"
 #include "tensor_ops.hpp"
 
@@ -12,6 +13,7 @@
                           // the call site.
 
 #include <cstring>
+#include <functional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -181,9 +183,65 @@ std::size_t index_offset(const Tensor &t, const py::object &idx) {
     return offset;
 }
 
-// "Tensor(shape=(2, 3), strides=(3, 1), contiguous=True)" or similar. Values
-// are deliberately not printed: a repr that walks a 4 MB buffer is a trap in a
-// debugger, and to_numpy() at step 3 is the explicit way to see them.
+using GemmCall = std::function<void(const Tensor &, const Tensor &, Tensor &)>;
+
+// Throws std::invalid_argument on an unknown name.
+
+GemmCall select_gemm(const std::string &name, int num_threads) {
+
+
+    if (name == "naive")      return gemm_naive;
+    if (name == "ikj")        return gemm_ikj;
+    if (name == "tiled")      return gemm_tiled;
+    if (name == "avx2")       return gemm_avx2;
+    if (name == "tiled_simd") return gemm_tiled_simd;
+    if (name == "multithreaded") {
+
+        if (num_threads <= 0){
+            throw std::invalid_argument("Error: must be at least one thread.");
+        }
+        return [num_threads](const Tensor &a, const Tensor &b, Tensor &c) { gemm_multithreaded(a, b, c, num_threads); };
+    }
+    
+    throw std::invalid_argument("unknown kernel: " + name);
+}
+
+// Everything a Python caller can get wrong, converted to an exception.
+
+// Names the condition gemm_check_shapes rejected on, for the exception text.
+
+std::string gemm_reject_reason(const Tensor &A, const Tensor &B, const Tensor &C) {
+    if (A.rank() != 2 || B.rank() != 2 || C.rank() != 2) {
+        return "all operands must be rank 2 (got " + std::to_string(A.rank()) + ", " +
+               std::to_string(B.rank()) + ", " + std::to_string(C.rank()) + ")";
+    }
+
+    if (A.stride(1) != 1 || B.stride(1) != 1 || C.stride(1) != 1) {
+        return "all operands must have unit inner stride (got " + std::to_string(A.stride(1)) +
+               ", " + std::to_string(B.stride(1)) + ", " + std::to_string(C.stride(1)) +
+               "). A transposed operand needs .contiguous() first";
+    }
+
+    if (A.shape(1) != B.shape(0) || C.shape(0) != A.shape(0) || C.shape(1) != B.shape(1)) {
+        return "shape mismatch (" + std::to_string(A.shape(0)) + "x" + std::to_string(A.shape(1)) +
+               " * " + std::to_string(B.shape(0)) + "x" + std::to_string(B.shape(1)) + " into " +
+               std::to_string(C.shape(0)) + "x" + std::to_string(C.shape(1)) + ")";
+    }
+
+    return "invalid operand shapes for gemm";
+}
+
+void require_gemm_operands(const char *who, const Tensor &A, const Tensor &B, const Tensor &C) {
+
+    if (!gemm_check_shapes(who, A, B, C)){
+        throw std::invalid_argument(std::string(who) + ": " + gemm_reject_reason(A, B, C));
+    }
+
+    if (C.shares_storage_with(A) || C.shares_storage_with(B)) {
+        throw std::invalid_argument(std::string(who) + ": C must not share storage with A or B");
+    }
+}
+
 std::string tensor_repr(const Tensor &t) {
     std::string shape_str = py::repr(shape_tuple(t)).cast<std::string>();
     std::string strides_str = py::repr(strides_tuple(t)).cast<std::string>();
@@ -401,10 +459,6 @@ race. This is the same statement tensor.hpp already makes about the C++ side.
              "Raises ValueError on an expanded tensor - any dimension with\n"
              "stride 0 - because one store would alias several elements.")
 
-        // Copy is SHALLOW in C++ and stays shallow here. That is the single
-        // most surprising fact about this type, and Python is where someone
-        // will get bitten by it, so both halves are bound with the asymmetry
-        // stated rather than left in the header.
         .def("__copy__", [](const Tensor &t) -> Tensor {
                  return t;
              }, "Shallow: a second handle onto the same buffer. copy.deepcopy is\n"
@@ -460,27 +514,11 @@ race. This is the same statement tensor.hpp already makes about the C++ side.
           "transposed tensor here still gives you a legal output buffer.");
 
     // Elementwise ops.
-    //
-    // Out-parameter, mirroring C++, not `c = add(a, b)`. Phase 5's graph
-    // allocates its own outputs anyway, and a wrapper that allocated and
-    // zeroed would throw away the accumulate that phase 6 is built on.
-    //
-    // GIL stays HELD for all of these: scalar, single-threaded,
-    // bandwidth-bound. It is released only where C++ threads actually run,
-    // which in phase 4 is gemm and nothing else. Revisit if an elementwise
-    // path is ever threaded or vectorised.
 
     m.def("add", [](const Tensor &a, const Tensor &b, Tensor &out) -> void {
             ::add(a,b, out);
           }, py::arg("a"), py::arg("b"), py::arg("out"),
-          "out = a + b, elementwise.\n\n"
-          "a and b may have ANY strides - a transposed view or a stride-0\n"
-          "expand is read in place, never materialised. out must be contiguous\n"
-          "and is OVERWRITTEN, not accumulated into; add_into is the one that\n"
-          "accumulates.\n\n"
-          "Shapes must match exactly. There is no implicit broadcasting: write\n"
-          ".expand(...) at the call site, where it is visible. Raises\n"
-          "ValueError on a shape mismatch or a non-contiguous out.");
+          "out = a + b, elementwise.");
 
     m.def("mul", [](const Tensor &a, const Tensor &b, Tensor &out) -> void {
             ::mul(a,b, out);
@@ -516,6 +554,19 @@ race. This is the same statement tensor.hpp already makes about the C++ side.
           "Accumulates in double. Naive float32 accumulation drifts 1.4e-4\n"
           "relative over 100000 elements, fourteen times the tolerance used\n"
           "everywhere else here.");
+
+    // GEMM. C += A @ B, accumulating, returning None.
+    // the other and the collision goes with it.
+    m.def("gemm", [](const Tensor &A, const Tensor &B, Tensor &C,
+                    const std::string &kernel, int num_threads) -> void {
+                    require_gemm_operands("gemm", A, B, C);
+                    const GemmCall run = select_gemm(kernel, num_threads);
+                    { py::gil_scoped_release release; run(A, B, C); }
+            
+          },
+          py::arg("A"), py::arg("B"), py::arg("C"),
+          py::arg("kernel") = "tiled_simd", py::arg("num_threads") = 8,
+          "C += A @ B. Accumulates; returns None.");
 
     /* --------------------------------------------------------------------- */
     /* Phase 2 throwaway. Retired at step 6, once the real gemm binding is     */
