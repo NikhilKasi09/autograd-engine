@@ -2,6 +2,7 @@
 
 #include "gemm.hpp"
 #include "tensor.hpp"
+#include "tensor_ops.hpp"
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -457,6 +458,64 @@ race. This is the same statement tensor.hpp already makes about the C++ side.
           "Zeroed CONTIGUOUS tensor with t's shape - not t's strides.\n\n"
           "That is exactly what an out-parameter needs, and it is why passing a\n"
           "transposed tensor here still gives you a legal output buffer.");
+
+    // Elementwise ops.
+    //
+    // Out-parameter, mirroring C++, not `c = add(a, b)`. Phase 5's graph
+    // allocates its own outputs anyway, and a wrapper that allocated and
+    // zeroed would throw away the accumulate that phase 6 is built on.
+    //
+    // GIL stays HELD for all of these: scalar, single-threaded,
+    // bandwidth-bound. It is released only where C++ threads actually run,
+    // which in phase 4 is gemm and nothing else. Revisit if an elementwise
+    // path is ever threaded or vectorised.
+
+    m.def("add", [](const Tensor &a, const Tensor &b, Tensor &out) -> void {
+            ::add(a,b, out);
+          }, py::arg("a"), py::arg("b"), py::arg("out"),
+          "out = a + b, elementwise.\n\n"
+          "a and b may have ANY strides - a transposed view or a stride-0\n"
+          "expand is read in place, never materialised. out must be contiguous\n"
+          "and is OVERWRITTEN, not accumulated into; add_into is the one that\n"
+          "accumulates.\n\n"
+          "Shapes must match exactly. There is no implicit broadcasting: write\n"
+          ".expand(...) at the call site, where it is visible. Raises\n"
+          "ValueError on a shape mismatch or a non-contiguous out.");
+
+    m.def("mul", [](const Tensor &a, const Tensor &b, Tensor &out) -> void {
+            ::mul(a,b, out);
+          }, py::arg("a"), py::arg("b"), py::arg("out"),
+          "out = a * b, ELEMENTWISE. Not a matrix product - that is gemm.\n\n"
+          "Same contract as add.");
+
+    m.def("scale", [](const Tensor &in, float scalar, Tensor &out) -> void {
+              ::scale(in, scalar, out);
+          }, py::arg("a"), py::arg("s"), py::arg("out"),
+          "out = a * s, for a Python float s. Same contract as add.");
+
+    m.def("relu", [](const Tensor &a, Tensor &out) -> void {
+              ::relu(a, out);
+          }, py::arg("a"), py::arg("out"),
+          "out = max(a, 0), elementwise. Same contract as add.");
+
+    m.def("add_into", [](Tensor &dst, const Tensor &src) -> void {
+              ::add_into(dst, src);
+          }, py::arg("dst"), py::arg("src"),
+          "dst += src. The ONLY op that reads its destination.\n\n"
+          "This exists for phase 6: a tensor used twice in a graph receives two\n"
+          "gradient contributions, and they have to accumulate rather than the\n"
+          "second overwriting the first.\n\n"
+          "dst must be contiguous; src may have any strides.");
+
+    m.def("sum", [](const Tensor &a) -> float {
+              return ::sum(a);
+          }, py::arg("a"),
+          "Sum of every element, reading through a's strides - so summing an\n"
+          "expanded view counts each repeat, which is the arithmetically\n"
+          "correct answer for what that view represents.\n\n"
+          "Accumulates in double. Naive float32 accumulation drifts 1.4e-4\n"
+          "relative over 100000 elements, fourteen times the tolerance used\n"
+          "everywhere else here.");
 
     /* --------------------------------------------------------------------- */
     /* Phase 2 throwaway. Retired at step 6, once the real gemm binding is     */
