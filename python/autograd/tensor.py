@@ -28,7 +28,7 @@ class Tensor:
         self.grad = None
         self.requires_grad = requires_grad
         self.grad_fn = None
-        self.retains_grad = False 
+        self.retains_grad = False
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -46,7 +46,7 @@ class Tensor:
 
     def detach(self) -> Tensor:
         """A new node over the same buffer, outside the graph."""
-        return Tensor(self.data, requires_grad = False)
+        return Tensor(self.data, requires_grad=False)
 
     def retain_grad(self) -> None:
         """Ask a backward pass to populate `grad` on this non-leaf."""
