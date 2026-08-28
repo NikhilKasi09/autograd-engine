@@ -125,12 +125,20 @@ file(GLOB GEMM_PYTHON_SOURCES CONFIGURE_DEPENDS
 # Globbing *.py rather than copying the directory is deliberate: the source
 # package also holds the Release build's _core.so, and copying that into another
 # tree is the two-trees-one-module trap the per-tree layout exists to prevent.
+#
+# A separate ALL target, NOT a POST_BUILD on _core. POST_BUILD runs only when
+# _core itself relinks, so editing a .py and rebuilding left the tree holding
+# the previous copy - stale, silent, and looking exactly like broken code when
+# the suite was run against it. This target's command runs every build;
+# copy_if_different compares before writing, so the cost is four stats.
 if(NOT GEMM_PYTHON_MODULE_DIR STREQUAL "${CMAKE_SOURCE_DIR}/python/autograd")
-    add_custom_command(TARGET _core POST_BUILD
+    add_custom_target(autograd_package ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${GEMM_PYTHON_MODULE_DIR}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 ${GEMM_PYTHON_SOURCES}
                 "${GEMM_PYTHON_MODULE_DIR}/"
         COMMENT "Copying the autograd package next to _core")
+    add_dependencies(autograd_package _core)
 endif()
 
 # ---------------------------------------------------------------------------
