@@ -110,17 +110,27 @@ target_link_libraries(_core PRIVATE gemm_core)
 set_target_properties(_core PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY "${GEMM_PYTHON_MODULE_DIR}")
 
-# Every tree gets its own __init__.py beside its own _core, so each tree is a
-# complete importable package and PYTHONPATH alone decides which one is used.
-# Without this the source-tree package would be the only one that imports, and
-# pointing PYTHONPATH at a build tree would find a _core with no package around
-# it - or worse, fall back to the stale Release module.
+# Every tree gets its own copy of the pure-Python package beside its own _core,
+# so each tree is a complete importable package and PYTHONPATH alone decides
+# which one is used. Without this the source-tree package would be the only one
+# that imports, and pointing PYTHONPATH at a build tree would find a _core with
+# no package around it - or worse, fall back to the stale Release module.
+#
+# CONFIGURE_DEPENDS re-runs the glob at build time, so a new module added to the
+# package reaches the other trees without a manual reconfigure. Phase 5 turned
+# this from a single hardcoded __init__.py into a glob for exactly that reason.
+file(GLOB GEMM_PYTHON_SOURCES CONFIGURE_DEPENDS
+     "${CMAKE_SOURCE_DIR}/python/autograd/*.py")
+
+# Globbing *.py rather than copying the directory is deliberate: the source
+# package also holds the Release build's _core.so, and copying that into another
+# tree is the two-trees-one-module trap the per-tree layout exists to prevent.
 if(NOT GEMM_PYTHON_MODULE_DIR STREQUAL "${CMAKE_SOURCE_DIR}/python/autograd")
     add_custom_command(TARGET _core POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CMAKE_SOURCE_DIR}/python/autograd/__init__.py"
-                "${GEMM_PYTHON_MODULE_DIR}/__init__.py"
-        COMMENT "Copying autograd/__init__.py next to _core")
+                ${GEMM_PYTHON_SOURCES}
+                "${GEMM_PYTHON_MODULE_DIR}/"
+        COMMENT "Copying the autograd package next to _core")
 endif()
 
 # ---------------------------------------------------------------------------

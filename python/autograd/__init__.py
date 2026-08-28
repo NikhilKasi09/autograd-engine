@@ -1,13 +1,13 @@
 """Micro-PyTorch autograd engine.
 
-Phase 4: this package is the compiled core and nothing else. `_core` holds the
-C++ Tensor and the forward kernels; the autograd graph arrives in phase 5.
+Two layers. `_core` is the compiled half: the C++ `Tensor`, its views, the
+elementwise kernels and the six GEMM kernels. Around it sits the graph - an
+`autograd.Tensor` that *holds* a `_core.Tensor`, a `Function` node per
+operation, and a `backward()` that walks the graph in reverse topological order.
 
-`_core.Tensor` is deliberately NOT re-exported as `autograd.Tensor`. That name
-is reserved for the phase 5 graph type, which will *hold* a `_core.Tensor`
-rather than be one. Reach the raw type as `autograd._core.Tensor`. Deciding
-this now costs a comment; deciding it in phase 5 costs a rename across every
-test.
+`_core.Tensor` is deliberately NOT re-exported. `autograd.Tensor` is the graph
+type; reach the raw one as `autograd._core.Tensor` when you want a buffer
+without a node attached.
 
 This file is copied into whichever build tree produced `_core`, so every tree
 holds a complete, importable package. Which tree ends up on sys.path is decided
@@ -15,5 +15,6 @@ by the environment, never by pytest config - see the note in pyproject.toml.
 """
 
 from . import _core
+from .tensor import Tensor
 
-__all__ = ["_core"]
+__all__ = ["_core", "Tensor"]
