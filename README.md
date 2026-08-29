@@ -18,8 +18,10 @@ The GEMM library is finished, handles arbitrary shapes, and has been ported
 from C to C++. The tensor type it runs on is finished too, and it is now
 exposed to Python: the tensor, its views, the elementwise ops and all six GEMM
 kernels are callable from there, sharing memory with NumPy rather than copying
-through it. The autograd half — the graph, the backward pass — has not been
-started yet.
+through it. The autograd half has started: there is a graph, a topological
+sort and a working `backward()`, differentiating addition and elementwise
+multiplication. The remaining operations — matmul, relu, sum — are next, and
+they are the ones that need new kernels rather than new graph machinery.
 
 The port replaced `posix_memalign`/`free` with RAII storage that owns its
 aligned buffer, pthreads with `std::jthread`, the Makefile with CMake, and the
@@ -196,7 +198,9 @@ broken reduction, which is an evening nobody gets back.
 ## The Python surface
 
 `autograd._core` exposes the tensor type and the forward kernels. No graph
-logic and no gradient logic — that half is Python, and it starts at phase 5.
+logic and no gradient logic — that half is Python, and it sits on top of this
+one. `autograd.Tensor` is the graph type and is documented in the next section;
+`_core.Tensor` is the buffer it holds.
 
 ```python
 from autograd import _core
@@ -257,6 +261,71 @@ the kernel walk the operand in the other order instead of rewriting it. That is
 not hard to add, but doing it after the graph exists means touching every call
 site in it, so it is written down here rather than discovered in a profile.
 
+## The autograd graph
+
+`autograd.Tensor` *holds* a `_core.Tensor` rather than being one. The C++ type
+owns the buffer, the shape and the strides; the Python type owns the gradient
+slot and the edge back to whatever produced it.
+
+```python
+import numpy as np
+import autograd
+from autograd import _core
+
+x = autograd.Tensor(_core.from_numpy(np.array([2.0], np.float32)), requires_grad=True)
+
+a = autograd.mul(x, x)          # x^2
+b = autograd.add(a, x)          # x^2 + x
+c = autograd.mul(b, a)          # x^4 + x^3
+
+c.backward()
+np.asarray(x.grad)              # [44.] = 4x^3 + 3x^2 at x = 2
+```
+
+**A `Function` instance is the node.** PyTorch splits a stateless `Function`
+from a per-call context object; here one object is both, holding the tensors it
+consumed and whatever the backward pass will need. One thing to inspect when a
+graph is wrong instead of two.
+
+**Every edge points backward, and that is what stops the graph leaking.** A
+tensor holds its `grad_fn`, a `grad_fn` holds its parents, and nothing holds a
+result. Dropping the loss frees the entire graph by reference counting, with
+the cycle collector never involved — which the test suite asserts directly, by
+taking weak references into a graph and checking they die on `del` *without*
+calling `gc.collect()` first. Calling it would make that test pass on a graph
+made entirely of cycles.
+
+The rule that keeps it true is that a node saves raw `_core.Tensor` buffers and
+never graph tensors. The temptation arrives in the next phase: `relu`'s
+backward wants its own output to build a mask from, and saving the output
+*tensor* would close the loop.
+
+**Reverse topological order is what makes a tensor used twice correct.** Its
+gradient is the sum of what comes back down each path, so no node may be
+processed until every node that could send it a gradient already has. A
+post-order walk reversed gives that; a breadth-first walk does not — though it
+happens to be right on graphs this shallow, which is exactly how the bug would
+have survived to the MNIST run. The suite pins it with a diamond whose answer
+is 5; a stack-based walk reads 2 on the same graph.
+
+**Gradients land on leaves only.** Intermediates keep theirs in a dictionary
+that dies with the pass, unless asked otherwise with `retain_grad()`. What does
+persist is accumulated rather than assigned, so two `backward()` calls sum and
+`zero_grad()` in a training loop means something.
+
+**`.grad` holds a raw `_core.Tensor`, not a graph tensor.** torch makes it the
+same type, which is what allows gradients of gradients; here a gradient is data
+rather than a node, and keeping it raw is part of what guarantees no edge
+points forward. Accumulation buffers take their shape from the tensor they
+belong to rather than from the incoming gradient, so a wrong-shaped gradient is
+rejected by `add_into` instead of propagating quietly into `.grad`.
+
+Two operations so far, `add` and `mul`, chosen because between them they cover
+every node shape the engine has to handle — one with nothing saved, one with
+both operands saved, and both able to receive two gradients at once. Neither
+needed a new C++ kernel, so the graph arrived without touching the C++ side at
+all.
+
 ## Building
 
 ```bash
@@ -267,9 +336,9 @@ cmake --build build -j
 
 ./build/gemm_benchmark        # the ladder, all hardware threads
 ./build/gemm_benchmark 8      # ...or a specific thread count
-./build/gemm_tests            # correctness, 1493 assertions
+./build/gemm_tests            # correctness, 1528 assertions
 ./build/gemm_tests "[tensor]" # ...or one tag: tensor, view, ops, gemm
-.venv/bin/pytest tests/python # bindings and the NumPy cross-check
+.venv/bin/pytest tests/python # bindings, autograd, NumPy cross-check
 ctest --test-dir build        # both suites together
 ```
 
@@ -277,7 +346,8 @@ ctest --test-dir build        # both suites together
 `cmake --build build && ctest --test-dir build`.
 
 Each build tree writes its own complete `autograd` package — `_core` plus a
-copy of `__init__.py` — so a tree can be tested without disturbing any other.
+copy of the Python package — so a tree can be tested without disturbing any
+other.
 Only a Release, unsanitised tree writes to `python/`, which is why a bare
 `pytest tests/python` needs no `PYTHONPATH`. Any other tree is selected by
 naming it:
@@ -365,13 +435,31 @@ Worth knowing: ASan cannot catch a column overrun on any row except the last,
 because it lands in the next row of the same allocation. The numeric comparison
 is what actually catches those.
 
+The graph tests are structural rather than numerical — gradient checking
+against finite differences is a later phase, and for `add` and `mul` the
+analytic gradients are exact anyway, so they are compared against hand-derived
+NumPy expressions. Three of them carry the weight. The diamond pins the walk
+order, and it is the only test in the file that a breadth-first walk fails.
+The lifetime test asserts that weak references into a dropped graph die without
+`gc.collect()`, which is the difference between "no cycles" and "cycles the
+collector happens to clean up". And one test asserts that a node with no
+gradient-requiring input builds no node at all, rather than building one and
+flagging it unwanted — a distinction invisible in every gradient value and
+visible only as memory growth.
+
+Both were checked by mutation rather than trusted. Breaking the walk to a
+stack-based order moves the diamond from 5 to 2. Swapping the pair returned by
+multiplication's backward, or having it return the incoming gradient unchanged,
+fails five or six tests each — the operands are distinct and the shape is 2x3
+precisely so that those mutations cannot pass.
+
 ## Roadmap
 
 - [x] Generalise the GEMM library to arbitrary M, N and K
 - [x] Port to C++, CMake, Catch2
 - [x] Tensor type: shape, strides, views, elementwise ops
 - [x] pybind11 bindings
-- [ ] Autograd graph and `backward()`
+- [x] Autograd graph and `backward()`
 - [ ] Backward kernels
 - [ ] Gradient checking against finite differences and PyTorch
 - [ ] `nn` layers, loss functions, SGD
@@ -387,4 +475,5 @@ The history of that work is preserved in this repo's commits.
 
 Everything since then is mine: generalising all six kernels to arbitrary
 shapes, the leading-dimension rework, the test harness, the benchmarking
-above, the port to C++, and the tensor type.
+above, the port to C++, the tensor type, the pybind11 bindings, and the
+autograd graph.
