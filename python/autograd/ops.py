@@ -24,8 +24,9 @@ class Add(Function):
         return out
 
     def backward(self, grad_out: _core.Tensor) -> tuple[_core.Tensor | None, ...]:
-        # Written in step 3, where the engine that calls it exists.
-        raise NotImplementedError
+        """d(a+b)/da and d(a+b)/db are both 1, so grad_out passes straight
+        through to each parent."""
+        return (grad_out, grad_out)
 
 
 class Mul(Function):

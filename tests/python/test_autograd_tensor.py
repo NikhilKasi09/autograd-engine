@@ -13,7 +13,6 @@ buffer nobody reads.
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
 import autograd
 from autograd import _core
@@ -137,20 +136,6 @@ def test_a_write_through_a_detached_tensor_reaches_the_original() -> None:
     t.detach().data[1, 1] = 7.0
 
     assert t.data[1, 1] == 7.0
-
-
-# --------------------------------------------------------------------------
-# Not yet implemented
-# --------------------------------------------------------------------------
-
-
-def test_backward_is_declared_but_not_yet_implemented() -> None:
-    """Pins the surface. The engine lands in a later step; the method exists now
-    so that step writes a body instead of adding a method."""
-    t = autograd.Tensor(raw(np.zeros([1])), requires_grad=True)
-
-    with pytest.raises(NotImplementedError):
-        t.backward()
 
 
 # --------------------------------------------------------------------------

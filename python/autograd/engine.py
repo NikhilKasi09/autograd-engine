@@ -1,4 +1,4 @@
-"""The node type. One Function instance per operation performed."""
+"""The node type, and the backward pass that walks the nodes."""
 
 from __future__ import annotations
 
@@ -56,3 +56,65 @@ class Function:
         not.
         """
         raise NotImplementedError
+
+
+def topological_sort(root: Tensor) -> list[Tensor]:
+    visited = set()
+    res = []
+    stack = [(root, False)]
+    while stack:
+        node, processed = stack.pop()
+        if processed:
+            res.append(node)
+            continue
+        if node in visited:
+            continue
+        visited.add(node)
+        stack.append((node, True))
+        if node.grad_fn is not None:
+            for parent in node.grad_fn.parents:
+                stack.append((parent, False))
+    return list(reversed(res))
+
+
+def backward(root: Tensor, gradient: _core.Tensor | None = None) -> None:
+    """Accumulate gradients from root back to every leaf that asked for one."""
+    # Check gradients
+    if not root.requires_grad:
+        raise RuntimeError("Error: root must require gradient")
+
+    if gradient is None and root.data.numel() != 1:
+        raise RuntimeError("Error: root must be a scalar if no gradient exists")
+
+    # Root gradient must be one - creates tensor of all 0s except a single 1 in the correct position (seed)
+    if gradient is None:
+        rank = len(root.shape)
+        i = (0,) * rank
+        seed = _core.zeros_like(root.data)
+        seed[i] = 1.0
+        gradient = seed
+
+    sorted_nodes = topological_sort(root)
+    grads = {root: gradient}
+
+    # accumulation helper
+
+    def accumulate(grads: dict, tensor: Tensor, contribution: _core.Tensor) -> None:
+        if tensor not in grads:
+            grads[tensor] = _core.zeros_like(tensor.data)
+        _core.add_into(grads[tensor], contribution)
+
+    for node in sorted_nodes:
+        grad = grads[node]
+
+        if not node.is_leaf: # The node is not a leaf, it was created by add or mul so needs to propogate back
+            parents = node.grad_fn.backward(grad)
+            for parent, contribution in zip(node.grad_fn.parents, parents):
+                if contribution is not None:
+                    accumulate(grads, parent, contribution)
+
+        # Set the gradient on leafs that need it
+        if (node.is_leaf and node.requires_grad) or node.retains_grad:
+            if node.grad is None:
+                node.grad = _core.zeros_like(node.data)
+            _core.add_into(node.grad, grad)

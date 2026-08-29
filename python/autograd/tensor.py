@@ -54,10 +54,8 @@ class Tensor:
 
     def backward(self, gradient: _core.Tensor | None = None) -> None:
         """Accumulate gradients back to every requiring leaf. None seeds 1.0 on a scalar."""
-        # Deferred, not module-scope: engine imports this module, so a top-level
-        # import would close the cycle. Keeps the module graph one-way.
-        # TODO: from .engine import backward, and delegate to it.
-        raise NotImplementedError
+        from .engine import backward
+        backward(self, gradient)
 
     def to_numpy(self) -> np.ndarray:
         """An owning NumPy copy of the values."""

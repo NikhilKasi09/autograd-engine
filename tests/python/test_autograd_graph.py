@@ -189,15 +189,3 @@ def test_a_transposed_operand_is_read_in_place() -> None:
     out = autograd.add(x, leaf(b))
 
     assert np.array_equal(out.to_numpy(), a.T + b)
-
-
-# --------------------------------------------------------------------------
-# Not yet implemented
-# --------------------------------------------------------------------------
-
-
-def test_backward_is_not_implemented_yet() -> None:
-    out = autograd.add(leaf(np.zeros([1]), requires_grad=True), leaf(np.zeros([1])))
-
-    with pytest.raises(NotImplementedError):
-        out.grad_fn.backward(_core.zeros([1]))
