@@ -40,8 +40,12 @@ class Mul(Function):
         return out
 
     def backward(self, grad_out: _core.Tensor) -> tuple[_core.Tensor | None, ...]:
-        # Written in step 4.
-        raise NotImplementedError
+        a, b = self.saved
+        grad_a = _core.zeros_like(grad_out)
+        _core.mul(grad_out, b, grad_a)
+        grad_b = _core.zeros_like(grad_out)
+        _core.mul(grad_out, a, grad_b)
+        return (grad_a, grad_b)
 
 
 def add(a: Tensor, b: Tensor) -> Tensor:

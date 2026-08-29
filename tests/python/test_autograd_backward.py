@@ -143,6 +143,115 @@ def test_a_stored_gradient_matches_the_data_layout() -> None:
 
 
 # --------------------------------------------------------------------------
+# Multiplication: the saved-tensor path
+# --------------------------------------------------------------------------
+
+
+def test_each_operand_receives_the_others_value() -> None:
+    """d(a*b)/da is b, and d(a*b)/db is a.
+
+    The values are distinct and the shape is non-square on purpose: with a == b,
+    or on a symmetric shape, a backward that returned the pair the wrong way
+    round passes.
+    """
+    a = np.arange(6, dtype=np.float32).reshape(2, 3) + 1.0
+    b = np.arange(6, dtype=np.float32).reshape(2, 3) * 10.0 + 3.0
+
+    x, y = leaf(a), leaf(b)
+    autograd.mul(x, y).backward(_core.from_numpy(np.ones((2, 3), dtype=np.float32)))
+
+    assert np.array_equal(np.asarray(x.grad), b)
+    assert np.array_equal(np.asarray(y.grad), a)
+
+
+def test_squaring_a_tensor_accumulates_both_uses() -> None:
+    """d(x*x)/dx = 2x - saving and accumulation exercised together."""
+    a = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    x = leaf(a)
+
+    autograd.mul(x, x).backward(_core.from_numpy(np.ones(3, dtype=np.float32)))
+
+    assert np.array_equal(np.asarray(x.grad), 2.0 * a)
+
+
+def test_a_chain_matches_a_hand_derived_gradient() -> None:
+    """f = (x*y)*x = x^2 y, so df/dx = 2xy and df/dy = x^2."""
+    a = np.arange(6, dtype=np.float32).reshape(2, 3) + 1.0
+    b = np.arange(6, dtype=np.float32).reshape(2, 3) + 2.0
+
+    x, y = leaf(a), leaf(b)
+    autograd.mul(autograd.mul(x, y), x).backward(
+        _core.from_numpy(np.ones((2, 3), dtype=np.float32))
+    )
+
+    assert np.allclose(np.asarray(x.grad), 2.0 * a * b, rtol=1e-6, atol=1e-6)
+    assert np.allclose(np.asarray(y.grad), a * a, rtol=1e-6, atol=1e-6)
+
+
+def test_the_walk_order_survives_a_diamond_with_multiplication() -> None:
+    """The version step 3 could not run, now that Mul.backward exists.
+
+    a = x^2, b = a + x, c = b*a = x^4 + x^3, so dc/dx = 4x^3 + 3x^2 = 44 at x=2.
+    The add-only diamond proves the order; this one proves it holds when the two
+    contributions arriving at `a` have different magnitudes, which is where a
+    dropped path stops being a whole missing term and starts being a plausible
+    wrong number.
+    """
+    x = scalar(2.0)
+
+    a = autograd.mul(x, x)
+    b = autograd.add(a, x)
+    c = autograd.mul(b, a)
+
+    assert c.to_numpy()[0] == pytest.approx(24.0)  # x^4 + x^3
+
+    c.backward()
+
+    assert np.asarray(x.grad)[0] == pytest.approx(44.0)
+
+
+def test_a_frozen_operand_of_mul_keeps_no_gradient() -> None:
+    a = np.array([2.0, 3.0], dtype=np.float32)
+    b = np.array([5.0, 7.0], dtype=np.float32)
+
+    x = leaf(a, requires_grad=True)
+    y = leaf(b, requires_grad=False)
+    autograd.mul(x, y).backward(_core.from_numpy(np.ones(2, dtype=np.float32)))
+
+    assert np.array_equal(np.asarray(x.grad), b)
+    assert y.grad is None
+
+
+def test_mul_backward_reads_a_strided_incoming_gradient() -> None:
+    """The root's gradient is the caller's buffer, so it can be strided, and
+    Mul.backward feeds it straight to a kernel. Values in order is the assertion.
+    """
+    seed = np.arange(6, dtype=np.float32).reshape(3, 2) + 1.0
+    a = np.arange(6, dtype=np.float32).reshape(2, 3) + 1.0
+    b = np.arange(6, dtype=np.float32).reshape(2, 3) * 2.0 + 5.0
+
+    x, y = leaf(a), leaf(b)
+    strided = _core.from_numpy(seed).transpose(0, 1)
+    assert not strided.is_contiguous()
+
+    autograd.mul(x, y).backward(strided)
+
+    assert np.array_equal(np.asarray(x.grad), seed.T * b)
+    assert np.array_equal(np.asarray(y.grad), seed.T * a)
+
+
+def test_a_stored_mul_gradient_matches_the_data_layout() -> None:
+    x = leaf(np.arange(6, dtype=np.float32).reshape(2, 3) + 1.0)
+    y = leaf(np.arange(6, dtype=np.float32).reshape(2, 3) + 4.0)
+
+    autograd.mul(x, y).backward(_core.from_numpy(np.ones((2, 3), dtype=np.float32)))
+
+    for t in (x, y):
+        assert t.grad.shape == t.data.shape
+        assert t.grad.is_contiguous()
+
+
+# --------------------------------------------------------------------------
 # Repeat passes
 # --------------------------------------------------------------------------
 
