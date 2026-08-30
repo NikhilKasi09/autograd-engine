@@ -105,6 +105,11 @@ void mul(const Tensor &a, const Tensor &b, Tensor &out) {
     binary_elementwise(a, b, out, "mul", [](float x, float y) { return x * y; });
 }
 
+void relu_backward(const Tensor &grad_out, const Tensor &ref, Tensor &out) {
+    binary_elementwise(grad_out, ref, out, "relu_backward",
+                       [](float g, float r) { return r > 0.0f ? g : 0.0f; });
+}
+
 /* ------------------------------------------------------------------------ */
 /* Unary ops                                                                 */
 /* ------------------------------------------------------------------------ */

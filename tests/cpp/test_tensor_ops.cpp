@@ -102,6 +102,99 @@ TEST_CASE("relu clamps at zero", "[ops]") {
     REQUIRE(out.data()[4] == 3.0f);
 }
 
+TEST_CASE("relu_backward masks the gradient on the reference's sign", "[ops]") {
+    Tensor grad_out({4});
+    Tensor ref({4});
+    Tensor out({4});
+
+    // ref carries the sign; grad_out carries the value. Deliberately unrelated,
+    // so swapping the two lambda parameters gives a different answer rather
+    // than a coincidence.
+    ref.data()[0] = -2.0f; ref.data()[1] = 0.0f;
+    ref.data()[2] = 3.0f;  ref.data()[3] = 1.0f;
+
+    grad_out.data()[0] = 5.0f;  grad_out.data()[1] = 7.0f;
+    grad_out.data()[2] = -4.0f; grad_out.data()[3] = 0.0f;
+
+    relu_backward(grad_out, ref, out);
+
+    REQUIRE(out.data()[0] == 0.0f);  // ref negative, gradient blocked
+    REQUIRE(out.data()[1] == 0.0f);  // ref EXACTLY zero - the > vs >= case, and
+                                     // the only element that distinguishes them
+    REQUIRE(out.data()[2] == -4.0f); // a NEGATIVE gradient passes through a
+                                     // positive ref. relu clamps its output;
+                                     // relu_backward must not clamp a gradient
+    REQUIRE(out.data()[3] == 0.0f);  // zero gradient, positive ref
+
+    // Swapping the lambda's parameters gives {-2, 0, 0, 0}; ignoring ref gives
+    // {5, 7, -4, 0}; using >= gives 7 at index 1. All three differ above.
+}
+
+TEST_CASE("relu_backward reads strided operands through their strides", "[ops]") {
+    SECTION("a transposed gradient") {
+        Tensor t({2, 3});
+        fill_iota(t); // rows {0 1 2} and {3 4 5}
+
+        const Tensor tr = t.transpose(0, 1); // 3x2: {0 3} {1 4} {2 5}
+
+        Tensor ref({3, 2});
+        fill_with(ref, 1.0f); // all positive: the mask passes everything, so
+                              // the ONLY thing under test here is the walk
+        Tensor out({3, 2});
+
+        relu_backward(tr, ref, out);
+
+        // Correct: {0 3 1 4 2 5} in memory order. A kernel walking tr's buffer
+        // flat produces {0 1 2 3 4 5} - the same multiset, so a sum or a total
+        // would wave it through.
+        const float expected[6] = {0, 3, 1, 4, 2, 5};
+        for (std::size_t i = 0; i < 6; i++) {
+            REQUIRE(out.data()[i] == expected[i]);
+        }
+    }
+
+    SECTION("a transposed reference") {
+        Tensor t({2, 2});
+        t(0, 0) = -1.0f; t(0, 1) = 2.0f;
+        t(1, 0) = 3.0f;  t(1, 1) = -4.0f;
+
+        const Tensor tr = t.transpose(0, 1); // {-1 3} {2 -4}
+
+        Tensor grad_out({2, 2});
+        fill_with(grad_out, 9.0f);
+        Tensor out({2, 2});
+
+        relu_backward(grad_out, tr, out);
+
+        // The mask follows tr's LAYOUT, not its buffer order. A flat walk masks
+        // positions {1, 2} instead of {1, 2} reordered - here that is
+        // {0, 9, 9, 0} the wrong way round.
+        REQUIRE(out.data()[0] == 0.0f); // -1
+        REQUIRE(out.data()[1] == 9.0f); //  3
+        REQUIRE(out.data()[2] == 9.0f); //  2
+        REQUIRE(out.data()[3] == 0.0f); // -4
+    }
+}
+
+TEST_CASE("relu_backward rejects bad shapes and a non-contiguous output", "[ops]") {
+    Tensor grad_out({2, 3});
+    Tensor ref({2, 3});
+    Tensor out({2, 3});
+
+    Tensor wrong_extents({3, 2});
+    REQUIRE_THROWS_AS(relu_backward(grad_out, wrong_extents, out), std::invalid_argument);
+
+    Tensor wrong_rank({6});
+    REQUIRE_THROWS_AS(relu_backward(grad_out, wrong_rank, out), std::invalid_argument);
+
+    REQUIRE_THROWS_AS(relu_backward(grad_out, ref, wrong_extents), std::invalid_argument);
+
+    Tensor base({3, 2});
+    Tensor tr_out = base.transpose(0, 1); // 2x3, strides {1, 2}
+    REQUIRE_FALSE(tr_out.is_contiguous());
+    REQUIRE_THROWS_AS(relu_backward(grad_out, ref, tr_out), std::invalid_argument);
+}
+
 TEST_CASE("sum totals every element", "[ops]") {
     Tensor a({2, 3});
     fill_iota(a); // 0 + 1 + 2 + 3 + 4 + 5

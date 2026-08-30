@@ -42,6 +42,18 @@ void scale(const Tensor &a, float s, Tensor &out);
 // out = max(a, 0)
 void relu(const Tensor &a, Tensor &out);
 
+// out = ref > 0 ? grad_out : 0. The backward half of relu.
+//
+// ref is whichever tensor carries the sign, and the graph passes relu's OUTPUT
+// rather than its input - relu(x) > 0 exactly when x > 0, so the mask is
+// identical and the node keeps one buffer alive instead of two. The parameter
+// is named ref rather than input because both are correct arguments.
+//
+// The comparison is strict, matching relu's own x > 0.0f above. At exactly zero
+// relu has no derivative and every framework picks a subgradient; picking 0
+// keeps the forward and backward kernels agreeing at the boundary.
+void relu_backward(const Tensor &grad_out, const Tensor &ref, Tensor &out);
+
 // dst += src. The only op that reads its destination, and the reason it exists
 // is phase 6: a tensor used twice in the forward pass receives a gradient
 // contribution from each use, and they have to accumulate rather than the
