@@ -180,6 +180,53 @@ void add_into(Tensor &dst, const Tensor &src) {
     }
 }
 
+void sum_into(Tensor &dst, const Tensor &src) {
+    // Rank first - every shape(d) below asserts d < rank.
+    if (dst.rank() != src.rank()) {
+        throw std::invalid_argument("sum_into: rank mismatch");
+    }
+
+    // An extent either matches src or is 1, which marks a collapsed dimension.
+    // Anything else is not a collapse.
+    for (std::size_t d = 0; d < dst.rank(); ++d) {
+        std::size_t ds = dst.shape(d);
+        std::size_t ss = src.shape(d);
+        if (ds != ss && ds != 1) {
+            throw std::invalid_argument("sum_into: incompatible shape");
+        }
+    }
+
+    require_contiguous_out(dst, "sum_into");
+
+    Walk ws = padded(src);
+    Walk wd = padded(dst);
+
+    // Zero the stride on each collapsed dimension, so every index along it
+    // lands on the same float and the += below does the summing. This is the
+    // one place sum_into differs from add_into, which walks its destination
+    // with a counter because its shapes always match.
+    for (std::size_t d = 0; d < MAX_RANK; d++) {
+        if (wd.shape[d] == 1) {
+            wd.strides[d] = 0;
+        }
+    }
+
+    float *dst_ptr = dst.data();
+    const float *src_ptr = src.data();
+
+    for (std::size_t i0 = 0; i0 < ws.shape[0]; i0++) {
+        for (std::size_t i1 = 0; i1 < ws.shape[1]; i1++) {
+            for (std::size_t i2 = 0; i2 < ws.shape[2]; i2++) {
+                for (std::size_t i3 = 0; i3 < ws.shape[3]; i3++) {
+                    std::size_t src_off = i0*ws.strides[0] + i1*ws.strides[1] + i2*ws.strides[2] + i3*ws.strides[3];
+                    std::size_t dst_off = i0*wd.strides[0] + i1*wd.strides[1] + i2*wd.strides[2] + i3*wd.strides[3];
+                    dst_ptr[dst_off] += src_ptr[src_off];
+                }
+            }
+        }
+    }
+}
+
 float sum(const Tensor &src) {// Collapses the entire tensor down to a single number
     Walk ws = padded(src);
     const float *src_ptr = src.data();

@@ -236,6 +236,128 @@ TEST_CASE("add_into accumulates rather than overwriting", "[ops]") {
     }
 }
 
+TEST_CASE("sum_into collapses dimensions whose destination extent is 1", "[ops]") {
+    Tensor src({2, 3});
+    fill_iota(src); // rows {0 1 2} and {3 4 5}
+
+    SECTION("to a scalar - every dimension collapses") {
+        Tensor dst({1, 1});
+        sum_into(dst, src);
+        REQUIRE(dst.data()[0] == 15.0f);
+    }
+
+    SECTION("down the rows - the bias gradient shape") {
+        Tensor dst({1, 3});
+        sum_into(dst, src);
+
+        // Column sums {0+3, 1+4, 2+5}. A kernel that kept add_into's lin++
+        // counter writes 6 floats into this 3-float buffer.
+        REQUIRE(dst.data()[0] == 3.0f);
+        REQUIRE(dst.data()[1] == 5.0f);
+        REQUIRE(dst.data()[2] == 7.0f);
+    }
+
+    SECTION("across the columns") {
+        Tensor dst({2, 1});
+        sum_into(dst, src);
+
+        // Row sums. Deliberately the other axis on the same non-square input,
+        // so a kernel collapsing the wrong dimension fails one of these two.
+        REQUIRE(dst.data()[0] == 3.0f);  // 0+1+2
+        REQUIRE(dst.data()[1] == 12.0f); // 3+4+5
+    }
+
+    SECTION("no collapse at all - identical to add_into") {
+        Tensor dst({2, 3});
+        Tensor reference({2, 3});
+
+        sum_into(dst, src);
+        add_into(reference, src);
+
+        for (std::size_t i = 0; i < 6; i++) {
+            REQUIRE(dst.data()[i] == reference.data()[i]);
+        }
+    }
+
+    SECTION("into a prefilled destination") {
+        Tensor dst({1, 3});
+        fill_with(dst, 100.0f);
+
+        sum_into(dst, src);
+
+        // The += contract. Overwriting instead of accumulating gives {3, 5, 7}
+        // here - the right shape, a plausible magnitude, and wrong.
+        REQUIRE(dst.data()[0] == 103.0f);
+        REQUIRE(dst.data()[1] == 105.0f);
+        REQUIRE(dst.data()[2] == 107.0f);
+
+        // And again, to prove it keeps accumulating.
+        sum_into(dst, src);
+        REQUIRE(dst.data()[0] == 106.0f);
+        REQUIRE(dst.data()[1] == 110.0f);
+        REQUIRE(dst.data()[2] == 114.0f);
+    }
+}
+
+TEST_CASE("sum_into reads a strided source through its strides", "[ops]") {
+    SECTION("a transposed source") {
+        Tensor t({2, 3});
+        fill_iota(t); // rows {0 1 2} and {3 4 5}
+
+        const Tensor tr = t.transpose(0, 1); // 3x2: {0 3} {1 4} {2 5}
+        Tensor dst({1, 2});
+
+        sum_into(dst, tr);
+
+        // Column sums of tr: {0+1+2, 3+4+5}. A flat walk of tr's buffer pairs
+        // the elements as {0 1} {2 3} {4 5} and returns {6, 9} - the same
+        // total, split wrong. A sum() comparison would pass on that.
+        REQUIRE(dst.data()[0] == 3.0f);
+        REQUIRE(dst.data()[1] == 12.0f);
+    }
+
+    SECTION("an expanded source - the round trip through expand") {
+        Tensor row({1, 3});
+        row.data()[0] = 1.0f;
+        row.data()[1] = 2.0f;
+        row.data()[2] = 4.0f;
+
+        // expand out to 4 rows with stride 0, then collapse straight back.
+        // Nothing materialises a 4x3 buffer in either direction.
+        const Tensor wide = row.expand({4, 3});
+        Tensor dst({1, 3});
+
+        sum_into(dst, wide);
+
+        REQUIRE(dst.data()[0] == 4.0f);  // 4 x 1
+        REQUIRE(dst.data()[1] == 8.0f);  // 4 x 2
+        REQUIRE(dst.data()[2] == 16.0f); // 4 x 4
+    }
+}
+
+TEST_CASE("sum_into rejects bad shapes and a non-contiguous destination", "[ops]") {
+    Tensor src({2, 3});
+
+    // Rank change is the caller's .reshape(...), not this kernel's business.
+    Tensor wrong_rank({6});
+    REQUIRE_THROWS_AS(sum_into(wrong_rank, src), std::invalid_argument);
+
+    // An extent that is neither src's nor 1 has no meaning as a collapse.
+    Tensor wrong_extent({2, 2});
+    REQUIRE_THROWS_AS(sum_into(wrong_extent, src), std::invalid_argument);
+
+    // Bigger than the source is not a collapse either.
+    Tensor too_big({4, 3});
+    REQUIRE_THROWS_AS(sum_into(too_big, src), std::invalid_argument);
+
+    // Several logical elements of a non-contiguous destination alias one float,
+    // so the answer would depend on iteration order.
+    Tensor base({3, 2});
+    Tensor tr_dst = base.transpose(0, 1); // 2x3, strides {1, 2}
+    REQUIRE_FALSE(tr_dst.is_contiguous());
+    REQUIRE_THROWS_AS(sum_into(tr_dst, src), std::invalid_argument);
+}
+
 /* ------------------------------------------------------------------------ */
 /* Strided inputs - the cases a flat buffer walk fails                       */
 /* ------------------------------------------------------------------------ */

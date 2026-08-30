@@ -62,6 +62,20 @@ void relu_backward(const Tensor &grad_out, const Tensor &ref, Tensor &out);
 // dst must be contiguous; src may have any strides.
 void add_into(Tensor &dst, const Tensor &src);
 
+// dst += src, summing src over every dimension where dst's extent is 1 and
+// src's is larger. The exact inverse of Tensor::expand: expand gives a READ
+// dimension stride 0 so one float is read many times, this gives a WRITE
+// dimension stride 0 so many floats accumulate into one.
+//
+// Ranks must match, and each dst extent must be either src's or 1. Rank change
+// is a caller's .reshape(...) at the call site, so one function never has two
+// behaviours. dst must be contiguous; src may have any strides.
+//
+// Accumulates, like add_into and like every gemm kernel - the caller zeroes.
+// {2,3} -> {1,3} is the bias gradient, {2,3} -> {1,1} is a full reduction into
+// a tensor, and both are the same call.
+void sum_into(Tensor &dst, const Tensor &src);
+
 // Sum of every element, reading through a's strides - so summing an expand'd
 // view counts each repeat, which is correct and is what phase 6's broadcast
 // backward will rely on.
