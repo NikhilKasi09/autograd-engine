@@ -457,6 +457,28 @@ race. This is the same statement tensor.hpp already makes about the C++ side.
           "second overwriting the first.\n\n"
           "dst must be contiguous; src may have any strides.");
 
+    m.def("relu_backward", [](const Tensor &grad_out, const Tensor &ref, Tensor &out) -> void {
+              ::relu_backward(grad_out, ref, out);
+          }, py::arg("grad_out"), py::arg("ref"), py::arg("out"),
+          "out = grad_out where ref is strictly positive, 0 elsewhere.\n\n"
+          "The backward half of relu. The graph passes relu's own OUTPUT as\n"
+          "ref: relu(x) is positive exactly where x is, so the mask is the\n"
+          "same and the node keeps one buffer alive instead of two.\n\n"
+          "Same contract as add - any strides on both inputs, contiguous out.");
+
+    m.def("sum_into", [](Tensor &dst, const Tensor &src) -> void {
+              ::sum_into(dst, src);
+          }, py::arg("dst"), py::arg("src"),
+          "dst += src, summed over every dimension where dst's extent is 1.\n\n"
+          "expand run backwards: expand gives a read dimension stride 0 so one\n"
+          "float is read many times; this gives a write dimension stride 0 so\n"
+          "many floats land on one. dst {1,N} from src {M,N} is the bias\n"
+          "gradient; dst {1,1} is a full reduction into a tensor rather than\n"
+          "into a Python float, which is what sum below gives you.\n\n"
+          "Ranks must match - a rank change is your own .reshape(...) at the\n"
+          "call site. dst must be contiguous and is accumulated into, so zero\n"
+          "it first if you want the plain sum.");
+
     m.def("sum", [](const Tensor &a) -> float {
               return ::sum(a);
           }, py::arg("a"),

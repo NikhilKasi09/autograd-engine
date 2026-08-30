@@ -181,6 +181,178 @@ def test_relu_reads_an_expanded_input() -> None:
 
 
 # --------------------------------------------------------------------------
+# relu_backward - the mask
+# --------------------------------------------------------------------------
+
+
+def test_relu_backward_masks_on_the_reference_sign() -> None:
+    grad = np.array([5.0, 7.0, -4.0, 0.0], dtype=np.float32)
+    ref = np.array([-2.0, 0.0, 3.0, 1.0], dtype=np.float32)
+
+    out = _core.zeros([4])
+    _core.relu_backward(tensor(grad), tensor(ref), out)
+
+    # Exact, not allclose - these are representable. np.where gives the same
+    # subgradient choice at ref == 0 as the kernel's strict >.
+    assert np.array_equal(np.asarray(out), np.where(ref > 0, grad, 0.0))
+
+
+def test_relu_backward_reads_a_transposed_gradient_in_place() -> None:
+    """The stride path, exercised rather than merely assumed.
+
+    The result must equal grad.T elementwise, in order - a flat walk of the
+    transposed buffer holds the same six numbers rearranged, so a sum or a
+    checksum would wave that through.
+
+    What this canNOT catch is a binding that calls .contiguous() on its inputs:
+    that is clone(), which reads through the strides and preserves the logical
+    values, so it is a slow no-op rather than a wrong answer. Measured - the
+    mutation leaves the whole suite green. What the case buys is that the
+    strided read really runs, so the debug tree's assert_within_storage and
+    ASan have something to fire on. The contiguity trap that IS detectable is
+    on the destination; see test_sum_into_rejects_a_non_contiguous_destination.
+    """
+    grad = np.arange(6, dtype=np.float32).reshape(2, 3)
+    ref = np.ones((3, 2), dtype=np.float32)
+
+    grad_t = tensor(grad).transpose(0, 1)
+    assert not grad_t.is_contiguous()
+
+    out = _core.zeros([3, 2])
+    _core.relu_backward(grad_t, tensor(ref), out)
+
+    assert np.array_equal(np.asarray(out), grad.T)
+
+
+def test_relu_backward_reads_a_transposed_reference_in_place() -> None:
+    grad = np.full((3, 2), 9.0, dtype=np.float32)
+    ref = np.arange(-3, 3, dtype=np.float32).reshape(2, 3)
+
+    out = _core.zeros([3, 2])
+    _core.relu_backward(tensor(grad), tensor(ref).transpose(0, 1), out)
+
+    assert np.array_equal(np.asarray(out), np.where(ref.T > 0, 9.0, 0.0))
+
+
+def test_relu_backward_rejects_mismatched_shapes() -> None:
+    a = _core.zeros([2, 3])
+    with pytest.raises(ValueError, match="shape mismatch"):
+        _core.relu_backward(a, _core.zeros([3, 2]), a)
+
+
+def test_relu_backward_rejects_a_non_contiguous_output() -> None:
+    a = _core.zeros([2, 3])
+    tr_out = _core.zeros([3, 2]).transpose(0, 1)
+    assert not tr_out.is_contiguous()
+
+    with pytest.raises(ValueError, match="output must be contiguous"):
+        _core.relu_backward(a, a, tr_out)
+
+
+# --------------------------------------------------------------------------
+# sum_into - the broadcast collapse
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "dst_shape, axis",
+    [
+        pytest.param([1, 3], 0, id="down-the-rows"),
+        pytest.param([2, 1], 1, id="across-the-columns"),
+    ],
+)
+def test_sum_into_collapses_one_axis(dst_shape: list[int], axis: int) -> None:
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+
+    dst = _core.zeros(dst_shape)
+    _core.sum_into(dst, tensor(a))
+
+    assert np.array_equal(np.asarray(dst), a.sum(axis=axis, keepdims=True))
+
+
+def test_sum_into_collapses_every_axis_to_a_tensor() -> None:
+    """The difference from _core.sum, which returns a Python float.
+
+    A graph node's forward has to produce a _core.Tensor, so a full reduction
+    needs this rather than the scalar form.
+    """
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+
+    dst = _core.zeros([1, 1])
+    _core.sum_into(dst, tensor(a))
+
+    assert np.asarray(dst).shape == (1, 1)
+    assert np.asarray(dst)[0, 0] == pytest.approx(a.sum())
+
+
+def test_sum_into_accumulates_into_a_prefilled_destination() -> None:
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+    dst = tensor(np.full((1, 3), 100.0, dtype=np.float32))
+
+    _core.sum_into(dst, tensor(a))
+
+    # Overwriting instead of accumulating gives [3, 5, 7] - the right shape and
+    # a plausible magnitude, and wrong.
+    assert np.array_equal(np.asarray(dst), 100.0 + a.sum(axis=0, keepdims=True))
+
+
+def test_sum_into_reads_a_transposed_source() -> None:
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+
+    dst = _core.zeros([1, 2])
+    _core.sum_into(dst, tensor(a).transpose(0, 1))
+
+    # Column sums of a.T. A flat walk of the transposed buffer pairs the
+    # elements wrongly and returns [6, 9] - the same total, split wrong.
+    assert np.array_equal(np.asarray(dst), a.T.sum(axis=0, keepdims=True))
+
+
+def test_sum_into_reads_an_expanded_source() -> None:
+    """The round trip: expand out with stride 0, collapse straight back.
+
+    Nothing materialises a 4x3 buffer in either direction, which is the whole
+    reason the bias gradient does not allocate per step.
+    """
+    row = np.array([[1.0, 2.0, 4.0]], dtype=np.float32)
+
+    dst = _core.zeros([1, 3])
+    _core.sum_into(dst, tensor(row).expand([4, 3]))
+
+    assert np.array_equal(np.asarray(dst), 4.0 * row)
+
+
+def test_sum_into_rejects_a_rank_change() -> None:
+    with pytest.raises(ValueError, match="rank mismatch"):
+        _core.sum_into(_core.zeros([6]), _core.zeros([2, 3]))
+
+
+def test_sum_into_rejects_an_extent_that_is_neither_matching_nor_one() -> None:
+    with pytest.raises(ValueError, match="incompatible shape"):
+        _core.sum_into(_core.zeros([2, 2]), _core.zeros([2, 3]))
+
+
+def test_sum_into_rejects_a_destination_larger_than_the_source() -> None:
+    with pytest.raises(ValueError, match="incompatible shape"):
+        _core.sum_into(_core.zeros([4, 3]), _core.zeros([2, 3]))
+
+
+def test_sum_into_rejects_a_non_contiguous_destination() -> None:
+    """The one contiguity trap in this layer that a test can actually catch.
+
+    A binding contiguifying its destination would accumulate into a temporary
+    copy, drop it, and return None - leaving the caller's buffer untouched with
+    no error anywhere. Contiguifying an INPUT is undetectable by value, since
+    it preserves what the strides mean; contiguifying an OUTPUT throws the
+    write away. Measured: the mutation fails exactly this test and nothing else.
+    """
+    tr_dst = _core.zeros([3, 2]).transpose(0, 1)
+    assert not tr_dst.is_contiguous()
+
+    with pytest.raises(ValueError, match="output must be contiguous"):
+        _core.sum_into(tr_dst, _core.zeros([2, 3]))
+
+
+# --------------------------------------------------------------------------
 # add_into - the accumulating primitive
 # --------------------------------------------------------------------------
 

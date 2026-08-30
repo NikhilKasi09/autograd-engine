@@ -25,7 +25,9 @@ EXPECTED = [
     "mul",
     "scale",
     "relu",
+    "relu_backward",
     "add_into",
+    "sum_into",
     "sum",
     "gemm",
 ]
