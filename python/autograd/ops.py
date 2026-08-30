@@ -48,11 +48,85 @@ class Mul(Function):
         return (grad_a, grad_b)
 
 
+def _gemm_into(
+    a: _core.Tensor,
+    b: _core.Tensor,
+    out: _core.Tensor,
+    *,
+    ta: bool = False,
+    tb: bool = False,
+) -> None:
+    """out += (a or a.T) @ (b or b.T). The graph's ONLY _core.gemm call site.
+
+    Both inputs are materialised contiguous when they are not already - gemm
+    rejects a non-unit inner stride on all three operands, and an incoming
+    gradient is not guaranteed contiguous.
+
+    `out` is NOT contiguified and raises instead. Contiguifying it would hand
+    gemm a temporary copy, fill that, drop it, and leave the caller's buffer
+    untouched with nothing raised anywhere.
+
+    Everything transpose-related lives here so phase 9 can add gemm's
+    transa/transb by editing one function rather than every call site in the
+    graph. Until then a transposed operand costs an allocation and a copy.
+    """
+
+    if not out.is_contiguous():
+        raise ValueError("Error: out must be contiguous")
+
+    if ta:
+        a = a.transpose(0, 1)
+
+    if tb:
+        b = b.transpose(0, 1)
+
+    a = a.contiguous()
+    b = b.contiguous()
+
+    _core.gemm(a, b, out)
+
+
+class Matmul(Function):
+    """out = a @ b, a matrix product. Saves both operands.
+
+    Shapes are the mirror of the forward and are easy to transpose by mistake:
+    forward is {M,K} @ {K,N} -> {M,N}, so dA = dC @ b.T is {M,N} @ {N,K} and
+    dB = a.T @ dC is {K,M} @ {M,N}. On a square case all four have the same
+    shape and every wrong version still runs.
+    """
+
+    def forward(self, a: _core.Tensor, b: _core.Tensor) -> _core.Tensor:
+        self.saved = (a, b)
+        M, _ = a.shape
+        _, N = b.shape
+        out = _core.zeros([M, N])
+        _gemm_into(a, b, out)
+        return out
+
+    def backward(self, grad_out: _core.Tensor) -> tuple[_core.Tensor | None, ...]:
+        a, b = self.saved
+        M, K = a.shape
+        _, N = b.shape
+
+        da = _core.zeros([M, K])
+        _gemm_into(grad_out, b, da, tb=True)   # dA = grad_out @ b.T
+
+        db = _core.zeros([K, N])
+        _gemm_into(a, grad_out, db, ta=True)   # dB = a.T @ grad_out
+
+        return (da, db)
+
+
 def add(a: Tensor, b: Tensor) -> Tensor:
     """Elementwise sum. Shapes must match exactly; no implicit broadcasting."""
     return Add.apply(a, b)
 
 
 def mul(a: Tensor, b: Tensor) -> Tensor:
-    """Elementwise product. Not a matrix product - that arrives in phase 6."""
+    """Elementwise product. Not a matrix product - that is matmul."""
     return Mul.apply(a, b)
+
+
+def matmul(a: Tensor, b: Tensor) -> Tensor:
+    """Matrix product, {M,K} @ {K,N} -> {M,N}. Rank 2 only."""
+    return Matmul.apply(a, b)

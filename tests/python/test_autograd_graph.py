@@ -16,7 +16,7 @@ import pytest
 
 import autograd
 from autograd import _core
-from autograd.ops import Add, Mul
+from autograd.ops import Add, Matmul, Mul
 
 
 def leaf(a: np.ndarray, requires_grad: bool = False) -> autograd.Tensor:
@@ -189,3 +189,59 @@ def test_a_transposed_operand_is_read_in_place() -> None:
     out = autograd.add(x, leaf(b))
 
     assert np.array_equal(out.to_numpy(), a.T + b)
+
+
+# --------------------------------------------------------------------------
+# matmul - what a matrix product records
+# --------------------------------------------------------------------------
+
+
+def test_matmul_records_a_node_with_its_parents_in_order() -> None:
+    x = leaf(np.ones((2, 3)), requires_grad=True)
+    y = leaf(np.ones((3, 4)), requires_grad=True)
+
+    out = autograd.matmul(x, y)
+
+    assert isinstance(out.grad_fn, Matmul)
+    assert out.grad_fn.parents == (x, y)
+    assert out.requires_grad
+
+
+def test_matmul_output_has_the_product_shape_and_its_own_storage() -> None:
+    x = leaf(np.ones((2, 3)), requires_grad=True)
+    y = leaf(np.ones((3, 4)), requires_grad=True)
+
+    out = autograd.matmul(x, y)
+
+    assert out.shape == (2, 4)
+    assert out.data.is_contiguous()
+    assert not out.data.shares_storage_with(x.data)
+    assert not out.data.shares_storage_with(y.data)
+
+
+def test_matmul_forward_matches_numpy() -> None:
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+    b = np.arange(12, dtype=np.float32).reshape(3, 4)
+
+    out = autograd.matmul(leaf(a), leaf(b))
+
+    assert np.allclose(out.to_numpy(), a @ b, rtol=1e-6, atol=1e-6)
+
+
+def test_matmul_saves_raw_buffers_and_never_graph_tensors() -> None:
+    """The cycle rule, restated for the first op that saves two big operands."""
+    x = leaf(np.ones((2, 3)), requires_grad=True)
+    y = leaf(np.ones((3, 4)), requires_grad=True)
+
+    out = autograd.matmul(x, y)
+
+    assert len(out.grad_fn.saved) == 2
+    for item in out.grad_fn.saved:
+        assert isinstance(item, _core.Tensor)
+        assert not isinstance(item, autograd.Tensor)
+
+
+def test_matmul_builds_no_node_when_nothing_requires_grad() -> None:
+    out = autograd.matmul(leaf(np.ones((2, 3))), leaf(np.ones((3, 4))))
+    assert out.grad_fn is None
+    assert not out.requires_grad

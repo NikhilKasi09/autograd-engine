@@ -22,6 +22,7 @@ import pytest
 
 import autograd
 from autograd import _core
+from autograd.ops import _gemm_into
 
 
 def leaf(a: np.ndarray, requires_grad: bool = True) -> autograd.Tensor:
@@ -404,3 +405,104 @@ def test_dropping_the_root_frees_the_whole_graph_without_the_collector() -> None
         assert alive == [], f"still reachable after dropping the root: {alive}"
     finally:
         gc.enable()
+
+
+# --------------------------------------------------------------------------
+# matmul - the shapes are the mirror of the forward
+# --------------------------------------------------------------------------
+
+
+def test_matmul_backward_matches_a_hand_derived_gradient() -> None:
+    """Non-square at every position, which is what makes this test worth having.
+
+    Forward is {2,3} @ {3,4} -> {2,4}, so dA is {2,3} and dB is {3,4} and the
+    incoming gradient is {2,4}. All three differ. On a square case a swapped
+    pair, a missing transpose and a transposed result all run and all pass.
+    """
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+    b = np.arange(12, dtype=np.float32).reshape(3, 4)
+
+    x, y = leaf(a), leaf(b)
+    out = autograd.matmul(x, y)
+
+    dout = np.arange(8, dtype=np.float32).reshape(2, 4) + 1.0
+    out.backward(_core.from_numpy(np.ascontiguousarray(dout)))
+
+    assert np.allclose(np.asarray(x.grad), dout @ b.T, rtol=1e-6, atol=1e-6)
+    assert np.allclose(np.asarray(y.grad), a.T @ dout, rtol=1e-6, atol=1e-6)
+
+
+def test_matmul_gradients_take_their_shape_from_the_operands() -> None:
+    """zeros_like(grad_out) is {2,4} - the wrong shape for BOTH gradients."""
+    x, y = leaf(np.ones((2, 3))), leaf(np.ones((3, 4)))
+    out = autograd.matmul(x, y)
+
+    out.backward(_core.from_numpy(np.ones((2, 4), dtype=np.float32)))
+
+    assert x.grad.shape == (2, 3)
+    assert y.grad.shape == (3, 4)
+    assert x.grad.is_contiguous()
+    assert y.grad.is_contiguous()
+
+
+def test_matmul_backward_reads_a_strided_incoming_gradient() -> None:
+    """gemm rejects a non-unit inner stride on ALL THREE operands.
+
+    An incoming gradient is not guaranteed contiguous - Add.backward passes one
+    straight through. A _gemm_into that only contiguifies the transposed operand
+    raises ValueError here the moment a matmul sits downstream of an add.
+    """
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+    b = np.arange(12, dtype=np.float32).reshape(3, 4)
+
+    x, y = leaf(a), leaf(b)
+    out = autograd.matmul(x, y)
+
+    # A {2,4} view whose inner stride is 4, not 1.
+    dout = np.arange(8, dtype=np.float32).reshape(4, 2) + 1.0
+    strided = _core.from_numpy(np.ascontiguousarray(dout)).transpose(0, 1)
+    assert not strided.is_contiguous()
+
+    out.backward(strided)
+
+    assert np.allclose(np.asarray(x.grad), dout.T @ b.T, rtol=1e-6, atol=1e-6)
+    assert np.allclose(np.asarray(y.grad), a.T @ dout.T, rtol=1e-6, atol=1e-6)
+
+
+def test_matmul_leaves_a_frozen_operand_without_a_gradient() -> None:
+    x = leaf(np.ones((2, 3)), requires_grad=True)
+    y = leaf(np.ones((3, 4)), requires_grad=False)
+
+    out = autograd.matmul(x, y)
+    out.backward(_core.from_numpy(np.ones((2, 4), dtype=np.float32)))
+
+    assert y.grad is None
+    assert x.grad is not None
+
+
+def test_a_leaf_matmulled_with_itself_accumulates_both_contributions() -> None:
+    a = np.arange(4, dtype=np.float32).reshape(2, 2) + 1.0
+    x = leaf(a)
+
+    out = autograd.matmul(x, x)
+    dout = np.ones((2, 2), dtype=np.float32)
+    out.backward(_core.from_numpy(dout))
+
+    # d/dX of X@X is dout @ X.T + X.T @ dout - one contribution per use.
+    assert np.allclose(np.asarray(x.grad), dout @ a.T + a.T @ dout, rtol=1e-6, atol=1e-6)
+
+
+def test_gemm_into_refuses_a_non_contiguous_destination() -> None:
+    """The chokepoint's asymmetry, asserted directly.
+
+    Contiguifying an input is a slow no-op. Contiguifying the OUTPUT fills a
+    temporary and drops it, leaving the caller's buffer zero with nothing
+    raised - so the helper must reject rather than repair.
+    """
+    a = _core.zeros([2, 3])
+    b = _core.zeros([3, 4])
+    tr_out = _core.zeros([4, 2]).transpose(0, 1)
+    assert not tr_out.is_contiguous()
+
+    with pytest.raises(ValueError):
+        _gemm_into(a, b, tr_out)
