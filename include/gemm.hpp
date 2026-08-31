@@ -12,9 +12,9 @@
  are written with restrict pointers, so gemm(A, B, A) is undefined behaviour
  rather than a slow path.
 
- Kernels are being generalised from square-only to arbitrary M, N and K one at
- a time. Each one below says what it currently accepts, and its wrapper
- reports on stderr and returns without touching C if given anything else.
+ Every kernel accepts arbitrary M, N and K. A wrapper handed operands it
+ cannot use reports on stderr and returns without touching C; the Python
+ binding turns that same check into an exception instead.
 */
 
 /**
@@ -39,8 +39,8 @@ void gemm_naive(const Tensor &A, const Tensor &B, Tensor &C);
  * Uses unaligned loads, since only the base pointer of a matrix is 32-byte
  * aligned and row i sits at data + i * stride.
  *
- * The j loop has no scalar tail yet, so N must currently be a multiple of 8.
- * The wrapper rejects anything else. Lifted at step F.
+ * Accepts any M, N and K. Leftover columns are peeled off and run through
+ * gemm_tiled_kernel rather than padded.
  *
  * @param A Pointer to the first input matrix struct (read-only).
  * @param B Pointer to the second input matrix struct (read-only).
@@ -74,9 +74,10 @@ void gemm_tiled(const Tensor &A, const Tensor &B, Tensor &C);
  * hardware registers, eliminating store-forwarding stalls.
  *
  * The 256-bit loads and stores are the unaligned forms, since only the base
- * pointer of a matrix is 32-byte aligned. Neither j loop has a scalar tail
- * yet, so N must currently be a multiple of 8 and the wrapper rejects anything
- * else. Lifted at step G.
+ * pointer of a matrix is 32-byte aligned.
+ *
+ * Accepts any M, N and K. Ragged rows and columns are peeled and run through
+ * gemm_tiled_kernel.
  *
  * @param A Pointer to the first input matrix struct (read-only).
  * @param B Pointer to the second input matrix struct (read-only).
