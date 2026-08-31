@@ -16,7 +16,7 @@ import pytest
 
 import autograd
 from autograd import _core
-from autograd.ops import Add, Matmul, Mul, Relu, Sum
+from autograd.ops import Add, Expand, Matmul, Mul, Relu, Sum
 
 
 def leaf(a: np.ndarray, requires_grad: bool = False) -> autograd.Tensor:
@@ -341,3 +341,45 @@ def test_an_op_taking_no_configuration_rejects_a_keyword() -> None:
 
     with pytest.raises(TypeError):
         Add.apply(x, x, shape=(1, 1))
+
+
+# --------------------------------------------------------------------------
+# expand - the first op whose output does not own its buffer
+# --------------------------------------------------------------------------
+
+
+def test_expand_records_one_parent() -> None:
+    x = leaf(np.ones((1, 3)), requires_grad=True)
+
+    out = autograd.expand(x, (2, 3))
+
+    assert isinstance(out.grad_fn, Expand)
+    assert out.grad_fn.parents == (x,)
+
+
+def test_expand_forward_returns_a_view_over_its_input() -> None:
+    """The property no phase 5 op had, asserted rather than discovered.
+
+    Materialising here would give identical values and cost an allocation per
+    forward pass - exactly what stride 0 exists to avoid.
+    """
+    row = np.array([[1.0, 2.0, 4.0]], dtype=np.float32)
+    x = leaf(row, requires_grad=True)
+
+    out = autograd.expand(x, (4, 3))
+
+    assert out.shape == (4, 3)
+    assert out.data.shares_storage_with(x.data)
+    assert not out.data.is_contiguous()
+    assert 0 in out.data.strides
+    assert np.array_equal(out.to_numpy(), np.repeat(row, 4, axis=0))
+
+
+def test_expand_rejects_stretching_a_dimension_larger_than_one() -> None:
+    with pytest.raises(ValueError, match="extent > 1"):
+        autograd.expand(leaf(np.ones((2, 3))), (4, 3))
+
+
+def test_expand_rejects_a_rank_change() -> None:
+    with pytest.raises(ValueError, match="same rank"):
+        autograd.expand(leaf(np.ones((1, 3))), (2, 1, 3))

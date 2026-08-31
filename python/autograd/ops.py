@@ -175,6 +175,35 @@ class Sum(Function):
         return (grad_out.expand(self.input_shape),)
 
 
+class Expand(Function):
+    """out = a broadcast up to `shape`. Sum read backwards, and the code says so.
+
+    Sum.forward allocates and calls sum_into; Expand.backward allocates and
+    calls sum_into. Sum.backward returns an expand view; Expand.forward returns
+    an expand view. One kernel, two ops, each free on one side.
+
+    forward returns a VIEW - it allocates nothing and shares storage with its
+    input. Materialising an {N,M} copy of a bias on every forward pass is the
+    cost stride 0 exists to avoid, and phase 8's Linear would pay it per layer
+    per step. See the amended note on Function.forward.
+
+    Only an extent of 1 may stretch; _core enforces that and rank equality, so
+    neither is re-checked here.
+    """
+
+    def __init__(self, shape: tuple[int, ...]) -> None:
+        self.target_shape = shape
+
+    def forward(self, a: _core.Tensor) -> _core.Tensor:
+        self.input_shape = a.shape
+        return a.expand(self.target_shape)
+
+    def backward(self, grad_out: _core.Tensor) -> tuple[_core.Tensor | None, ...]:
+        into = _core.zeros(list(self.input_shape))
+        _core.sum_into(into, grad_out)
+        return (into,)
+
+
 def add(a: Tensor, b: Tensor) -> Tensor:
     """Elementwise sum. Shapes must match exactly; no implicit broadcasting."""
     return Add.apply(a, b)
@@ -205,3 +234,13 @@ def reduce_sum(a: Tensor, shape: tuple[int, ...] | None = None) -> Tensor:
     if shape is None:
         shape = tuple(1 for _ in a.shape)
     return Sum.apply(a, shape=shape)
+
+
+def expand(a: Tensor, shape: tuple[int, ...]) -> Tensor:
+    """Broadcast a up to `shape`. Rank is unchanged; only extent-1 dims stretch.
+
+    The result shares a's storage and is not contiguous. Written at the call
+    site rather than inferred, because there is no implicit broadcasting
+    anywhere in this engine.
+    """
+    return Expand.apply(a, shape=shape)

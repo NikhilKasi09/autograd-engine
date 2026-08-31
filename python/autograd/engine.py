@@ -51,10 +51,17 @@ class Function:
             return Tensor(raw_result)
 
     def forward(self, *raw: _core.Tensor) -> _core.Tensor:
-        """Compute the result from raw tensors, allocating its own output.
+        """Compute the result from raw tensors.
 
-        Allocate with _core.zeros_like and call the out-parameter kernel. Save
-        whatever backward will need onto self.saved here.
+        Usually that means allocating an output with _core.zeros_like or
+        _core.zeros and calling the out-parameter kernel. A pure reshaping op
+        may instead return a VIEW that shares its input's storage - Expand does,
+        because materialising a broadcast is the allocation per forward pass
+        that stride 0 exists to avoid. Nothing in the engine writes through an
+        input, so sharing is safe; it is only worth knowing that an op output is
+        no longer guaranteed to own its buffer.
+
+        Save whatever backward will need onto self.saved here.
         """
         raise NotImplementedError
 

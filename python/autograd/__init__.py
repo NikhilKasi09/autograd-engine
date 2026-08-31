@@ -15,8 +15,8 @@ by the environment, never by pytest config - see the note in pyproject.toml.
 """
 
 from . import _core
-from .ops import add, matmul, mul, relu
+from .ops import add, expand, matmul, mul, relu
 from .ops import reduce_sum as sum
 from .tensor import Tensor
 
-__all__ = ["_core", "Tensor", "add", "matmul", "mul", "relu", "sum"]
+__all__ = ["_core", "Tensor", "add", "expand", "matmul", "mul", "relu", "sum"]

@@ -724,3 +724,128 @@ def test_a_leaf_feeding_a_sum_and_something_else_accumulates_both() -> None:
 
     # d/dx of (sum(x) + sum(x*x)) is 1 + 2x elementwise.
     assert np.allclose(np.asarray(x.grad), 1.0 + 2.0 * a, rtol=1e-6, atol=1e-6)
+
+
+# --------------------------------------------------------------------------
+# expand - Sum's dual, and the phase's deliverable
+# --------------------------------------------------------------------------
+
+
+def test_expand_backward_collapses_to_the_input_shape() -> None:
+    """The bias gradient. Its shape is the INPUT's, not the gradient's."""
+    x = leaf(np.array([[1.0, 2.0, 4.0]], dtype=np.float32))
+
+    out = autograd.expand(x, (2, 3))
+    dout = np.array([[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]], dtype=np.float32)
+    out.backward(_core.from_numpy(dout))
+
+    assert x.grad.shape == (1, 3)
+    assert np.array_equal(np.asarray(x.grad), dout.sum(axis=0, keepdims=True))
+
+
+def test_expand_then_sum_round_trips() -> None:
+    """Both ops and the one kernel underneath them, in a single assertion."""
+    row = np.array([[1.0, 2.0, 4.0]], dtype=np.float32)
+    x = leaf(row)
+
+    autograd.sum(autograd.expand(x, (4, 3)), shape=(1, 3)).backward(
+        _core.from_numpy(np.ones((1, 3), dtype=np.float32))
+    )
+
+    # Each element is read four times going up and summed four times coming
+    # back, so the gradient is the expansion factor.
+    assert np.array_equal(np.asarray(x.grad), np.full((1, 3), 4.0, dtype=np.float32))
+
+
+def test_a_bias_shaped_chain_matches_numpy() -> None:
+    """Phase 8's Linear layer, written by hand. Why Expand is in this phase."""
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+    w = np.arange(12, dtype=np.float32).reshape(3, 4)
+    b = np.array([[0.5, 1.5, 2.5, 3.5]], dtype=np.float32)
+
+    x, wt, bias = leaf(a), leaf(w), leaf(b)
+
+    out = autograd.add(autograd.matmul(x, wt), autograd.expand(bias, (2, 4)))
+    dout = np.arange(8, dtype=np.float32).reshape(2, 4) + 1.0
+    out.backward(_core.from_numpy(np.ascontiguousarray(dout)))
+
+    assert np.allclose(out.to_numpy(), a @ w + b, rtol=1e-6, atol=1e-6)
+    assert np.allclose(np.asarray(bias.grad), dout.sum(axis=0, keepdims=True), rtol=1e-6, atol=1e-6)
+    assert np.allclose(np.asarray(x.grad), dout @ w.T, rtol=1e-6, atol=1e-6)
+    assert np.allclose(np.asarray(wt.grad), a.T @ dout, rtol=1e-6, atol=1e-6)
+
+
+def test_a_two_layer_mlp_trains_end_to_end() -> None:
+    """THE deliverable of phase 6. Every op in it, arranged as phase 8 will.
+
+    matmul -> expand bias -> add -> relu -> matmul -> expand bias -> add -> sum,
+    then backward() with no seed, checked against a hand-written NumPy pass.
+    """
+    rng = np.random.default_rng(0xC0FFEE)
+    x_ = rng.standard_normal((4, 5)).astype(np.float32)
+    w1_ = rng.standard_normal((5, 3)).astype(np.float32)
+    b1_ = rng.standard_normal((1, 3)).astype(np.float32)
+    w2_ = rng.standard_normal((3, 2)).astype(np.float32)
+    b2_ = rng.standard_normal((1, 2)).astype(np.float32)
+
+    x = leaf(x_, requires_grad=False)
+    w1, b1, w2, b2 = leaf(w1_), leaf(b1_), leaf(w2_), leaf(b2_)
+
+    h = autograd.relu(autograd.add(autograd.matmul(x, w1), autograd.expand(b1, (4, 3))))
+    out = autograd.add(autograd.matmul(h, w2), autograd.expand(b2, (4, 2)))
+    loss = autograd.sum(out)
+
+    loss.backward()
+
+    # The same pass by hand.
+    z1 = x_ @ w1_ + b1_
+    a1 = np.maximum(z1, 0.0)
+    z2 = a1 @ w2_ + b2_
+
+    dz2 = np.ones_like(z2)
+    db2 = dz2.sum(axis=0, keepdims=True)
+    dw2 = a1.T @ dz2
+    da1 = dz2 @ w2_.T
+    dz1 = np.where(z1 > 0, da1, 0.0)
+    db1 = dz1.sum(axis=0, keepdims=True)
+    dw1 = x_.T @ dz1
+
+    assert np.allclose(loss.to_numpy(), z2.sum(), rtol=1e-5, atol=1e-5)
+    for got, want, name in [
+        (w1.grad, dw1, "w1"), (b1.grad, db1, "b1"),
+        (w2.grad, dw2, "w2"), (b2.grad, db2, "b2"),
+    ]:
+        assert got is not None, f"{name} received no gradient"
+        assert got.shape == want.shape, f"{name}: {got.shape} != {want.shape}"
+        assert got.is_contiguous(), f"{name} gradient is not contiguous"
+        assert np.allclose(np.asarray(got), want, rtol=1e-5, atol=1e-5), name
+
+    assert x.grad is None
+
+
+def _build_expand_graph_and_watch_it() -> tuple[autograd.Tensor, list[weakref.ref]]:
+    """Expand's output SHARES its input's buffer, so a naive lifetime argument
+    might expect that to keep something alive. It does not: the view holds a
+    refcount on the storage, not on the graph tensor."""
+    x = leaf(np.array([[1.0, 2.0]], dtype=np.float32))
+    y = leaf(np.full((2, 2), 3.0))
+
+    wide = autograd.expand(x, (2, 2))
+    root = autograd.mul(wide, y)
+
+    watched = [weakref.ref(x), weakref.ref(y), weakref.ref(wide), weakref.ref(wide.data)]
+    return root, watched
+
+
+def test_dropping_an_expand_graph_frees_it_without_the_collector() -> None:
+    gc.disable()
+    try:
+        root, watched = _build_expand_graph_and_watch_it()
+        assert all(ref() is not None for ref in watched), "graph died early"
+
+        del root
+
+        alive = [i for i, ref in enumerate(watched) if ref() is not None]
+        assert alive == [], f"still reachable after dropping the root: {alive}"
+    finally:
+        gc.enable()
