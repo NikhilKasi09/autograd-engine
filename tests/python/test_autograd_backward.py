@@ -621,3 +621,106 @@ def test_dropping_a_relu_graph_frees_it_without_the_collector() -> None:
         assert alive == [], f"still reachable after dropping the root: {alive}"
     finally:
         gc.enable()
+
+
+# --------------------------------------------------------------------------
+# sum - a gradient that is a view rather than a buffer
+# --------------------------------------------------------------------------
+
+
+def test_sum_backward_spreads_the_gradient_over_every_element() -> None:
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+    x = leaf(a)
+
+    autograd.sum(x).backward()
+
+    assert np.array_equal(np.asarray(x.grad), np.ones((2, 3), dtype=np.float32))
+
+
+def test_sum_backward_over_one_axis_matches_numpy() -> None:
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+    x = leaf(a)
+
+    out = autograd.sum(x, shape=(1, 3))
+    dout = np.array([[2.0, 3.0, 4.0]], dtype=np.float32)
+    out.backward(_core.from_numpy(dout))
+
+    # Each column's gradient is broadcast back down its rows.
+    assert np.array_equal(np.asarray(x.grad), np.repeat(dout, 2, axis=0))
+
+
+def test_summing_to_a_scalar_needs_no_explicit_seed() -> None:
+    """The path a loss takes: numel() == 1, so backward() seeds itself."""
+    x = leaf(np.arange(4, dtype=np.float32).reshape(2, 2))
+
+    autograd.sum(x).backward()
+
+    assert x.grad is not None
+
+
+def test_sum_backward_returns_a_stride_zero_view_not_a_buffer() -> None:
+    """The assertion that fails if the body quietly materialises the gradient.
+
+    zeros_like plus a kernel would give identical values everywhere. The point
+    of keeping the output's rank is that expand alone is legal here, so the
+    gradient costs no allocation - and add_into reads a stride-0 source fine.
+    """
+    x = leaf(np.ones((2, 3)))
+    out = autograd.sum(x, shape=(1, 3))
+
+    dout = _core.from_numpy(np.ones((1, 3), dtype=np.float32))
+    (grad,) = out.grad_fn.backward(dout)
+
+    assert grad.shape == (2, 3)
+    assert not grad.is_contiguous()
+    assert grad.shares_storage_with(dout)
+    assert 0 in grad.strides
+
+
+def test_sum_backward_accepts_a_strided_incoming_gradient() -> None:
+    """No .contiguous().reshape(...) anywhere, so a strided seed is not special.
+
+    This is the case that would raise if Sum's output were rank 1: reshape
+    throws on a non-contiguous tensor.
+    """
+    x = leaf(np.ones((2, 3)))
+    out = autograd.sum(x, shape=(1, 3))
+
+    # Transposing a {3,1} is NOT enough: it gives strides (1, 1), and
+    # is_contiguous skips extent-1 dimensions, so it comes back contiguous.
+    # A {1,3} that is genuinely strided needs a real gap on the last axis -
+    # transpose a {3,2} to {2,3} with strides (1, 2), then take one row.
+    base = np.array([[2.0, 0.0], [3.0, 0.0], [4.0, 0.0]], dtype=np.float32)
+    strided = _core.from_numpy(base).transpose(0, 1).slice(0, 0, 1)
+
+    assert strided.shape == (1, 3)
+    assert strided.strides == (1, 2)
+    assert not strided.is_contiguous()
+    assert np.array_equal(np.asarray(strided), np.array([[2.0, 3.0, 4.0]]))
+
+    out.backward(strided)
+
+    assert np.array_equal(
+        np.asarray(x.grad), np.repeat(np.array([[2.0, 3.0, 4.0]], np.float32), 2, axis=0)
+    )
+
+
+def test_a_leaf_feeding_a_sum_and_something_else_accumulates_both() -> None:
+    """A stride-0 view and a plain buffer accumulating into one .grad.
+
+    Phase 5 had one pass-through; Sum returns a view OVER the incoming gradient,
+    so add_into now sees sources of two different kinds in a single pass. No
+    true overlap is reachable today - accumulate always allocates dst fresh -
+    and the point is to pin that while the reason it holds is still one line.
+    """
+    a = np.arange(4, dtype=np.float32).reshape(2, 2) + 1.0
+    x = leaf(a)
+
+    total = autograd.sum(x)                       # {1,1}, gradient is a view
+    doubled = autograd.mul(x, x)                  # {2,2}, gradient is a buffer
+    root = autograd.add(total, autograd.sum(doubled))
+
+    root.backward()
+
+    # d/dx of (sum(x) + sum(x*x)) is 1 + 2x elementwise.
+    assert np.allclose(np.asarray(x.grad), 1.0 + 2.0 * a, rtol=1e-6, atol=1e-6)

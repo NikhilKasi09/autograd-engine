@@ -16,7 +16,7 @@ import pytest
 
 import autograd
 from autograd import _core
-from autograd.ops import Add, Matmul, Mul, Relu
+from autograd.ops import Add, Matmul, Mul, Relu, Sum
 
 
 def leaf(a: np.ndarray, requires_grad: bool = False) -> autograd.Tensor:
@@ -286,3 +286,58 @@ def test_relu_saves_its_own_output_buffer_and_not_the_wrapper() -> None:
     assert isinstance(saved, _core.Tensor)
     assert not isinstance(saved, autograd.Tensor)
     assert saved is out.data
+
+
+# --------------------------------------------------------------------------
+# sum, and configuration reaching a node without becoming an input
+# --------------------------------------------------------------------------
+
+
+def test_sum_records_one_parent_and_no_shape_argument() -> None:
+    """The keyword never becomes a parent, so it can never receive a gradient."""
+    x = leaf(np.ones((2, 3)), requires_grad=True)
+
+    out = autograd.sum(x)
+
+    assert isinstance(out.grad_fn, Sum)
+    assert out.grad_fn.parents == (x,)
+
+
+def test_sum_keeps_the_input_rank_with_ones() -> None:
+    """{2,3} -> {1,1}, not {1}. The rank is what makes backward a bare expand."""
+    out = autograd.sum(leaf(np.ones((2, 3))))
+
+    assert out.shape == (1, 1)
+    assert out.data.numel() == 1
+
+
+@pytest.mark.parametrize(
+    ("shape", "axis"),
+    [
+        pytest.param((1, 1), None, id="full"),
+        pytest.param((1, 3), 0, id="down-the-rows"),
+        pytest.param((2, 1), 1, id="across-the-columns"),
+    ],
+)
+def test_sum_forward_matches_numpy(shape: tuple[int, ...], axis: int | None) -> None:
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+
+    out = autograd.sum(leaf(a), shape=shape)
+
+    expected = a.sum(keepdims=True) if axis is None else a.sum(axis=axis, keepdims=True)
+    assert np.allclose(out.to_numpy(), expected, rtol=1e-6, atol=1e-6)
+
+
+def test_sum_does_not_keep_the_input_buffer_alive() -> None:
+    """A shape is configuration, not a buffer, so `saved` stays empty here."""
+    out = autograd.sum(leaf(np.ones((2, 3)), requires_grad=True))
+
+    assert not getattr(out.grad_fn, "saved", ())
+
+
+def test_an_op_taking_no_configuration_rejects_a_keyword() -> None:
+    """Function declares no __init__, so a stray keyword is a TypeError."""
+    x = leaf(np.ones((2, 2)), requires_grad=True)
+
+    with pytest.raises(TypeError):
+        Add.apply(x, x, shape=(1, 1))

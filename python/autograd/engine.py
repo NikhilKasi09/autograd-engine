@@ -24,19 +24,30 @@ class Function:
     #           and phase 6's relu will want to save its own output.
 
     @classmethod
-    def apply(cls, *inputs: Tensor) -> Tensor:
-        """Run the op, and record a node if any input requires grad."""
+    def apply(cls, *inputs: Tensor, **params) -> Tensor:
+        """Run the op, and record a node if any input requires grad.
+
+        Positional means differentiable: every one is a graph Tensor, lands in
+        parents, and receives a gradient. Keyword means configuration - a target
+        shape, an axis - which goes to the op's constructor and is never seen by
+        the walk. The alternative, smuggling a shape in as a tensor argument and
+        returning None for it, uses the non-differentiable-input path for
+        something that is not an input.
+
+        Function declares no __init__, so an op that takes no configuration
+        rejects a stray keyword with a TypeError at the call.
+        """
         raw_inputs = tuple(t.data for t in inputs)
 
         if any(t.requires_grad for t in inputs):
-            node = cls()
+            node = cls(**params)
             raw_result = node.forward(*raw_inputs)
             result = Tensor(raw_result, requires_grad=True)
             result.grad_fn = node
             node.parents = inputs
             return result
         else:
-            raw_result = cls().forward(*raw_inputs)
+            raw_result = cls(**params).forward(*raw_inputs)
             return Tensor(raw_result)
 
     def forward(self, *raw: _core.Tensor) -> _core.Tensor:

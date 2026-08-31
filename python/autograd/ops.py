@@ -145,6 +145,36 @@ class Relu(Function):
         return (into,)
 
 
+class Sum(Function):
+    """out = a summed down to `shape`, which keeps a's RANK with 1s where a
+    dimension collapsed: {2,3} -> {1,1} for a full reduction, {1,3} for a column
+    sum. Saves the input's shape, not the input.
+
+    The rank choice is what keeps backward free. Since the output has the same
+    rank, grad_out.expand(input_shape) is a legal stride-0 view - allocating
+    nothing, and read straight through by add_into. A rank-1 output would need
+    .contiguous().reshape(...) first, and reshape throws on a non-contiguous
+    input, so a strided incoming gradient would become an error case for no
+    reason.
+
+    A shape is a tuple of ints and belongs on the instance, not in `saved`,
+    which is for buffers. Keeping the operand alive just to read .shape off it
+    holds a buffer past the point anything needs it.
+    """
+
+    def __init__(self, shape: tuple[int, ...]) -> None:
+        self.target_shape = shape
+
+    def forward(self, a: _core.Tensor) -> _core.Tensor:
+        self.input_shape = a.shape
+        out = _core.zeros(list(self.target_shape))
+        _core.sum_into(out, a)
+        return out
+
+    def backward(self, grad_out: _core.Tensor) -> tuple[_core.Tensor | None, ...]:
+        return (grad_out.expand(self.input_shape),)
+
+
 def add(a: Tensor, b: Tensor) -> Tensor:
     """Elementwise sum. Shapes must match exactly; no implicit broadcasting."""
     return Add.apply(a, b)
@@ -163,3 +193,15 @@ def matmul(a: Tensor, b: Tensor) -> Tensor:
 def relu(a: Tensor) -> Tensor:
     """Elementwise max(a, 0)."""
     return Relu.apply(a)
+
+
+def reduce_sum(a: Tensor, shape: tuple[int, ...] | None = None) -> Tensor:
+    """Sum a down to `shape`, defaulting to a full reduction.
+
+    `shape` keeps a's rank with 1s on the collapsed dimensions, so a full
+    reduction of a {2,3} is {1,1}. Exported as `autograd.sum`; named
+    reduce_sum in this module so it does not shadow the builtin here.
+    """
+    if shape is None:
+        shape = tuple(1 for _ in a.shape)
+    return Sum.apply(a, shape=shape)
