@@ -506,3 +506,118 @@ def test_gemm_into_refuses_a_non_contiguous_destination() -> None:
 
     with pytest.raises(ValueError):
         _gemm_into(a, b, tr_out)
+
+
+# --------------------------------------------------------------------------
+# relu - the mask, and the op that could close the graph into a cycle
+# --------------------------------------------------------------------------
+
+
+def test_relu_backward_masks_on_the_sign_of_its_input() -> None:
+    a = np.array([[-2.0, 3.0], [0.5, -4.0]], dtype=np.float32)
+    x = leaf(a)
+
+    out = autograd.relu(x)
+    dout = np.array([[5.0, 7.0], [-1.0, 9.0]], dtype=np.float32)
+    out.backward(_core.from_numpy(dout))
+
+    # Exact - representable, and a mask either passes a value or zeroes it.
+    assert np.array_equal(np.asarray(x.grad), np.where(a > 0, dout, 0.0))
+
+
+def test_relu_gives_no_gradient_at_exactly_zero() -> None:
+    """The subgradient choice, pinned where a user can see it.
+
+    relu has no derivative at 0 and every framework picks one. Picking 0 keeps
+    the graph agreeing with the forward kernel, which outputs 0 there.
+    """
+    x = leaf(np.array([[0.0]]))
+
+    out = autograd.relu(x)
+    out.backward(_core.from_numpy(np.array([[5.0]], dtype=np.float32)))
+
+    assert np.asarray(x.grad)[0, 0] == 0.0
+
+
+def test_relu_returns_exactly_one_gradient() -> None:
+    """A single-input op returns a ONE-tuple; the trailing comma is load-bearing.
+
+    engine.backward zips parents against the returned tuple without strict=True,
+    so a bare tensor is silently truncated rather than raising. This is what
+    stands in for that missing strict=.
+    """
+    x = leaf(np.array([[1.0, -1.0]]))
+    out = autograd.relu(x)
+
+    grads = out.grad_fn.backward(_core.from_numpy(np.ones((1, 2), dtype=np.float32)))
+
+    assert isinstance(grads, tuple)
+    assert len(grads) == len(out.grad_fn.parents) == 1
+
+
+def test_relu_gradient_takes_its_shape_from_the_input() -> None:
+    x = leaf(np.ones((2, 3)))
+    out = autograd.relu(x)
+    out.backward(_core.from_numpy(np.ones((2, 3), dtype=np.float32)))
+
+    assert x.grad.shape == (2, 3)
+    assert x.grad.is_contiguous()
+
+
+def test_relu_backward_reads_a_strided_incoming_gradient() -> None:
+    a = np.array([[1.0, -1.0, 2.0], [3.0, 4.0, -5.0]], dtype=np.float32)
+    x = leaf(a)
+    out = autograd.relu(x)
+
+    dout = np.arange(6, dtype=np.float32).reshape(3, 2) + 1.0
+    strided = _core.from_numpy(np.ascontiguousarray(dout)).transpose(0, 1)
+    assert not strided.is_contiguous()
+
+    out.backward(strided)
+
+    assert np.array_equal(np.asarray(x.grad), np.where(a > 0, dout.T, 0.0))
+
+
+def _build_relu_graph_and_watch_it() -> tuple[autograd.Tensor, list[weakref.ref]]:
+    """Same contract as the mul factory: leaves created HERE, never passed in.
+
+    Relu saves the buffer it produced, so the interesting weakref is the one on
+    an intermediate's .data - that is the buffer the node holds, and the object
+    a cycle would strand.
+    """
+    x = leaf(np.array([[-1.0, 2.0], [3.0, -4.0]], dtype=np.float32))
+    y = leaf(np.full((2, 2), 3.0))
+
+    hidden = autograd.relu(autograd.mul(x, y))
+    root = autograd.mul(hidden, x)
+
+    watched = [
+        weakref.ref(x),
+        weakref.ref(y),
+        weakref.ref(hidden),
+        weakref.ref(x.data),
+        weakref.ref(hidden.data),
+    ]
+    return root, watched
+
+
+def test_dropping_a_relu_graph_frees_it_without_the_collector() -> None:
+    """Where saving the output WRAPPER instead of the buffer becomes visible.
+
+    Every value test above passes either way. Here a saved graph Tensor closes
+    output -> grad_fn -> saved -> output, and refcounting alone stops being
+    enough. No gc.collect() before the assert: it would make this pass on a
+    graph made entirely of cycles.
+    """
+    gc.disable()
+    try:
+        root, watched = _build_relu_graph_and_watch_it()
+
+        assert all(ref() is not None for ref in watched), "graph died early"
+
+        del root
+
+        alive = [i for i, ref in enumerate(watched) if ref() is not None]
+        assert alive == [], f"still reachable after dropping the root: {alive}"
+    finally:
+        gc.enable()

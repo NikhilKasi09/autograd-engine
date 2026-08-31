@@ -117,6 +117,34 @@ class Matmul(Function):
         return (da, db)
 
 
+class Relu(Function):
+    """out = max(a, 0), elementwise. Saves its OWN OUTPUT to mask with.
+
+    relu(x) is positive exactly where x is, so the output serves as the mask and
+    the node keeps one buffer alive rather than two - which is also what torch
+    does. What must be saved is the raw buffer, never the graph Tensor wrapping
+    it: the wrapper holds this node, so saving the wrapper closes the loop and
+    the graph stops being freeable by refcount alone. Every value test in the
+    suite passes either way; only the lifetime test sees the difference.
+
+    apply() builds that wrapper after forward returns, so inside forward the
+    buffer is all there is - which is the structural reason this is hard to get
+    wrong here, and the reason it is worth a test anyway.
+    """
+
+    def forward(self, a: _core.Tensor) -> _core.Tensor:
+        out = _core.zeros_like(a)
+        _core.relu(a, out)
+        self.saved = (out,)
+        return out
+
+    def backward(self, grad_out: _core.Tensor) -> tuple[_core.Tensor | None, ...]:
+        (saved_output,) = self.saved
+        into = _core.zeros_like(grad_out)
+        _core.relu_backward(grad_out, saved_output, into)
+        return (into,)
+
+
 def add(a: Tensor, b: Tensor) -> Tensor:
     """Elementwise sum. Shapes must match exactly; no implicit broadcasting."""
     return Add.apply(a, b)
@@ -130,3 +158,8 @@ def mul(a: Tensor, b: Tensor) -> Tensor:
 def matmul(a: Tensor, b: Tensor) -> Tensor:
     """Matrix product, {M,K} @ {K,N} -> {M,N}. Rank 2 only."""
     return Matmul.apply(a, b)
+
+
+def relu(a: Tensor) -> Tensor:
+    """Elementwise max(a, 0)."""
+    return Relu.apply(a)
