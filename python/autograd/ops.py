@@ -3,9 +3,15 @@
 Free functions rather than operators: every call site names the op that builds
 the node, which is what you want while reading a graph back.
 
-Two ops in phase 5, chosen so that nothing here needs a new C++ kernel. Add
-needs no saved state; Mul needs both operands, so between them they cover the
-node shapes the engine has to handle. matmul, relu and sum land in phase 6.
+Six ops, and between them they cover every node shape the engine has to handle.
+Add saves nothing. Mul saves both operands. Matmul saves both and returns
+gradients shaped unlike the one it was handed. Relu saves its own output. Sum
+and Expand are duals - each returns a view on one side and allocates on the
+other - and they are the two that take configuration rather than a second
+tensor, which is what apply's keyword arguments exist for.
+
+Every gemm the graph runs goes through _gemm_into, so the cost of a transposed
+operand is in one place rather than at four call sites.
 """
 
 from __future__ import annotations

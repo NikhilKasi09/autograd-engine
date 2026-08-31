@@ -20,8 +20,9 @@ exposed to Python: the tensor, its views, the elementwise ops and all six GEMM
 kernels are callable from there, sharing memory with NumPy rather than copying
 through it. The autograd half has started: there is a graph, a topological
 sort and a working `backward()`, differentiating addition and elementwise
-multiplication. The remaining operations — matmul, relu, sum — are next, and
-they are the ones that need new kernels rather than new graph machinery.
+multiplication. The rest of the operations have landed since: matmul, relu, a
+reduction and a broadcast, which between them are enough to run a small MLP
+forward and backward.
 
 The port replaced `posix_memalign`/`free` with RAII storage that owns its
 aligned buffer, pthreads with `std::jthread`, the Makefile with CMake, and the
@@ -177,11 +178,18 @@ impossible to forget rather than merely conventional.
 
 ## Elementwise ops
 
-`add`, `mul`, `scale`, `relu`, `add_into` and `sum`. Inputs may have any
-strides, so a transposed view or a broadcast is read where it lies; the output
-has to be contiguous. Shapes have to match exactly. There is no implicit
-broadcasting: a caller who wants one writes `expand` at the call site, where it
-is visible.
+`add`, `mul`, `scale`, `relu`, `relu_backward`, `add_into`, `sum_into` and
+`sum`. Inputs may have any strides, so a transposed view or a broadcast is read
+where it lies; the output has to be contiguous. Shapes have to match exactly.
+There is no implicit broadcasting: a caller who wants one writes `expand` at
+the call site, where it is visible.
+
+`sum_into` is the exception, and it is `expand` run backwards: `expand` gives a
+read dimension stride 0 so one float is read many times, `sum_into` gives a
+write dimension stride 0 so many floats land on one. Collapsing a `{4,3}` onto
+a `{1,3}` is a bias gradient. It looks like `add_into` and is not — `add_into`
+walks its destination with a counter, which only works because its shapes
+match, and keeping that counter here writes past the end of the buffer.
 
 These are scalar, on purpose. Elementwise work is memory bandwidth bound rather
 than compute bound, so vectorising it buys a fraction of what it buys in GEMM,
@@ -254,12 +262,16 @@ than the row is fine — that is what a slice produces, and the leading-dimensio
 handling exists for it — but a transposed operand is not, so it has to be
 materialised with `.contiguous()` first.
 
-Phase 6 will feel this. Backward wants `Xᵀ @ dY` and `dY @ Wᵀ`, so every
-backprop GEMM pays an allocation and a full copy, per layer, per step. BLAS
-solves it with `transa`/`transb` flags threaded through the call, which lets
-the kernel walk the operand in the other order instead of rewriting it. That is
-not hard to add, but doing it after the graph exists means touching every call
-site in it, so it is written down here rather than discovered in a profile.
+Backward feels this, since it wants `Xᵀ @ dY` and `dY @ Wᵀ` — so every backprop
+GEMM pays an allocation and a full copy, per layer, per step. BLAS solves it
+with `transa`/`transb` flags threaded through the call, letting the kernel walk
+the operand in the other order instead of rewriting it.
+
+The worry here was that adding the flags later would mean touching every call
+site in the graph. It would not: there is only one. Every GEMM the graph runs
+goes through a single private helper that owns the transposing, so `transa`
+becomes a change to that function and nothing else — a decision a profile can
+drive rather than one that had to be guessed now.
 
 ## The autograd graph
 
@@ -282,6 +294,14 @@ c.backward()
 np.asarray(x.grad)              # [44.] = 4x^3 + 3x^2 at x = 2
 ```
 
+A layer looks like this, and is what the backward operations were for:
+
+```python
+h = autograd.relu(autograd.add(autograd.matmul(x, w), autograd.expand(b, (4, 3))))
+loss = autograd.sum(h)
+loss.backward()                 # w.grad, b.grad
+```
+
 **A `Function` instance is the node.** PyTorch splits a stateless `Function`
 from a per-call context object; here one object is both, holding the tensors it
 consumed and whatever the backward pass will need. One thing to inspect when a
@@ -296,9 +316,11 @@ calling `gc.collect()` first. Calling it would make that test pass on a graph
 made entirely of cycles.
 
 The rule that keeps it true is that a node saves raw `_core.Tensor` buffers and
-never graph tensors. The temptation arrives in the next phase: `relu`'s
-backward wants its own output to build a mask from, and saving the output
-*tensor* would close the loop.
+never graph tensors. `relu` is where that stops being hypothetical: its
+backward masks on its own output, so the node holds the buffer it just produced
+while the tensor wrapping that buffer holds the node. Saving the *tensor*
+instead is a one-word change that produces identical numbers everywhere and
+hands the whole graph to the cycle collector.
 
 **Reverse topological order is what makes a tensor used twice correct.** Its
 gradient is the sum of what comes back down each path, so no node may be
@@ -320,11 +342,26 @@ points forward. Accumulation buffers take their shape from the tensor they
 belong to rather than from the incoming gradient, so a wrong-shaped gradient is
 rejected by `add_into` instead of propagating quietly into `.grad`.
 
-Two operations so far, `add` and `mul`, chosen because between them they cover
-every node shape the engine has to handle — one with nothing saved, one with
-both operands saved, and both able to receive two gradients at once. Neither
-needed a new C++ kernel, so the graph arrived without touching the C++ side at
-all.
+Six operations: `add`, `mul`, `matmul`, `relu`, `sum` and `expand`. The first
+two arrived without touching C++ at all, which was why they were chosen. The
+rest needed two new kernels between them and no more, because most of the work
+was already sitting in the tensor type.
+
+**`sum` and `expand` are one operation read in opposite directions.** `sum`
+allocates going forward and returns a view coming back; `expand` returns a view
+going forward and allocates coming back. Neither materialises a broadcast,
+which matters because a bias add is a broadcast on every forward pass of every
+layer. It does make `expand` the first op whose output does not own its buffer
+— safe, since nothing here writes through an input, but new.
+
+**Configuration reaches a node as a keyword argument, never as an input.** A
+target shape is not something you differentiate. Positional arguments are graph
+tensors and receive gradients; keyword arguments go to the node's constructor
+and the backward walk never sees them.
+
+Summing a `{2,3}` gives a `{1,1}`, not a bare scalar. Keeping the rank is what
+makes the backward a bare `expand` with no allocation — at rank 1 it would need
+a reshape first, and `reshape` refuses a non-contiguous tensor.
 
 ## Building
 
@@ -336,7 +373,7 @@ cmake --build build -j
 
 ./build/gemm_benchmark        # the ladder, all hardware threads
 ./build/gemm_benchmark 8      # ...or a specific thread count
-./build/gemm_tests            # correctness, 1528 assertions
+./build/gemm_tests            # correctness, 1575 assertions
 ./build/gemm_tests "[tensor]" # ...or one tag: tensor, view, ops, gemm
 .venv/bin/pytest tests/python # bindings, autograd, NumPy cross-check
 ctest --test-dir build        # both suites together
@@ -435,10 +472,12 @@ Worth knowing: ASan cannot catch a column overrun on any row except the last,
 because it lands in the next row of the same allocation. The numeric comparison
 is what actually catches those.
 
-The graph tests are structural rather than numerical — gradient checking
-against finite differences is a later phase, and for `add` and `mul` the
-analytic gradients are exact anyway, so they are compared against hand-derived
-NumPy expressions. Three of them carry the weight. The diamond pins the walk
+The graph tests are mostly structural. Gradient checking against finite
+differences is a later phase; for now gradients are compared against
+hand-derived NumPy expressions. The last of them is a two-layer MLP — matmul,
+bias broadcast, relu, matmul, loss — run forward and backward and checked
+against a NumPy pass on every parameter. Three others carry weight out of
+proportion to their size. The diamond pins the walk
 order, and it is the only test in the file that a breadth-first walk fails.
 The lifetime test asserts that weak references into a dropped graph die without
 `gc.collect()`, which is the difference between "no cycles" and "cycles the
@@ -453,6 +492,11 @@ multiplication's backward, or having it return the incoming gradient unchanged,
 fails five or six tests each — the operands are distinct and the shape is 2x3
 precisely so that those mutations cannot pass.
 
+The backward operations were checked the same way, and one result is worth
+keeping: a node saving its own output *wrapper* instead of the raw buffer fails
+nothing at all except the lifetime test, which is the whole argument for having
+one.
+
 ## Roadmap
 
 - [x] Generalise the GEMM library to arbitrary M, N and K
@@ -460,7 +504,7 @@ precisely so that those mutations cannot pass.
 - [x] Tensor type: shape, strides, views, elementwise ops
 - [x] pybind11 bindings
 - [x] Autograd graph and `backward()`
-- [ ] Backward kernels
+- [x] Backward kernels
 - [ ] Gradient checking against finite differences and PyTorch
 - [ ] `nn` layers, loss functions, SGD
 - [ ] Train an MLP on MNIST against a PyTorch baseline
@@ -475,5 +519,5 @@ The history of that work is preserved in this repo's commits.
 
 Everything since then is mine: generalising all six kernels to arbitrary
 shapes, the leading-dimension rework, the test harness, the benchmarking
-above, the port to C++, the tensor type, the pybind11 bindings, and the
-autograd graph.
+above, the port to C++, the tensor type, the pybind11 bindings, the autograd
+graph, and the backward operations on top of it.
