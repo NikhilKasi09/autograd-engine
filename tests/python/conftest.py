@@ -46,12 +46,34 @@ if _EXPECTED and Path(_core.__file__).parent != Path(_EXPECTED).resolve():
     )
 
 
-def pytest_report_header(config: pytest.Config) -> str:
-    """Name the tree the module actually came from, on every run.
+# torch is the cross-check oracle, not the thing under test, so a bare pytest
+# run skips those tests rather than failing. GEMM_REQUIRE_TORCH turns the skip
+# into an error; CMake sets it when it found torch at configure time, so a torch
+# that has since broken is caught. It cannot catch a torch that was never there.
+_REQUIRE_TORCH = os.environ.get("GEMM_REQUIRE_TORCH") == "1"
 
-    A wrong-tree import is otherwise invisible until two numbers disagree.
+try:
+    import torch
+
+    TORCH_VERSION: str | None = torch.__version__
+except ImportError as exc:
+    if _REQUIRE_TORCH:
+        raise RuntimeError(
+            "GEMM_REQUIRE_TORCH is set but torch will not import. Install it:\n"
+            "    .venv/bin/pip install torch --index-url "
+            "https://download.pytorch.org/whl/cpu"
+        ) from exc
+    TORCH_VERSION = None
+
+
+def pytest_report_header(config: pytest.Config) -> str:
+    """Name the tree the module came from, and whether torch is here, every run.
+
+    A wrong-tree import is otherwise invisible until two numbers disagree, and a
+    silently skipped cross-check looks exactly like a passing one.
     """
-    return f"autograd._core: {_core.__file__}"
+    torch_line = TORCH_VERSION or "not installed, cross-check will skip"
+    return f"autograd._core: {_core.__file__}\ntorch: {torch_line}"
 
 
 @pytest.fixture

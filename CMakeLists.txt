@@ -227,9 +227,38 @@ endif()
 #
 # GEMM_EXPECTED_MODULE_DIR turns a wrong-tree import into a hard failure in
 # conftest.py rather than a quietly wrong set of numbers.
+#
+# GEMM_REQUIRE_TORCH decides what a missing torch means for the cross-check:
+#   AUTO (default) - probe now, require it later only if it is here now. Catches
+#                    a torch that breaks after configure; does NOT catch one that
+#                    was never installed, which configures clean and skips.
+#   ON             - configure fails without it. For a tree where the
+#                    cross-check must actually run.
+#   OFF            - never required.
+set(GEMM_REQUIRE_TORCH "AUTO" CACHE STRING "Require torch for the gradient cross-check")
+set_property(CACHE GEMM_REQUIRE_TORCH PROPERTY STRINGS AUTO ON OFF)
+
 if(GEMM_SANITIZE STREQUAL "off")
+    set(GEMM_TORCH_ENV "")
+    if(NOT GEMM_REQUIRE_TORCH STREQUAL "OFF")
+        execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import torch"
+                        RESULT_VARIABLE GEMM_TORCH_MISSING
+                        OUTPUT_QUIET ERROR_QUIET)
+        if(GEMM_TORCH_MISSING EQUAL 0)
+            set(GEMM_TORCH_ENV ";GEMM_REQUIRE_TORCH=1")
+            message(STATUS "torch found: the gradient cross-check is required")
+        elseif(GEMM_REQUIRE_TORCH STREQUAL "ON")
+            message(FATAL_ERROR
+                    "GEMM_REQUIRE_TORCH=ON but torch will not import. Install it:\n"
+                    "  ${Python3_EXECUTABLE} -m pip install torch "
+                    "--index-url https://download.pytorch.org/whl/cpu")
+        else()
+            message(STATUS "torch not found: the gradient cross-check will SKIP")
+        endif()
+    endif()
+
     add_test(NAME python_bindings
              COMMAND "${Python3_EXECUTABLE}" -m pytest "${CMAKE_SOURCE_DIR}/tests/python" -q)
     set_tests_properties(python_bindings PROPERTIES
-        ENVIRONMENT "PYTHONPATH=${GEMM_PYTHON_ROOT};GEMM_EXPECTED_MODULE_DIR=${GEMM_PYTHON_MODULE_DIR}")
+        ENVIRONMENT "PYTHONPATH=${GEMM_PYTHON_ROOT};GEMM_EXPECTED_MODULE_DIR=${GEMM_PYTHON_MODULE_DIR}${GEMM_TORCH_ENV}")
 endif()
