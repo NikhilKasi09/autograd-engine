@@ -22,7 +22,9 @@ through it. The autograd half has started: there is a graph, a topological
 sort and a working `backward()`, differentiating addition and elementwise
 multiplication. The rest of the operations have landed since: matmul, relu, a
 reduction and a broadcast, which between them are enough to run a small MLP
-forward and backward.
+forward and backward. Those gradients are now checked against finite
+differences and cross-checked against PyTorch, rather than against expressions
+derived by the same hand that wrote them.
 
 The port replaced `posix_memalign`/`free` with RAII storage that owns its
 aligned buffer, pthreads with `std::jthread`, the Makefile with CMake, and the
@@ -368,6 +370,12 @@ a reshape first, and `reshape` refuses a non-contiguous tensor.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install pybind11 numpy pytest
 
+# Optional: the gradient cross-check skips without it, and says so in the
+# pytest header. Configure with -DGEMM_REQUIRE_TORCH=ON to refuse to build
+# without it; the default AUTO only requires it if it is present at configure
+# time, so it catches a torch that breaks later, not one never installed.
+.venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cpu
+
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
@@ -375,7 +383,7 @@ cmake --build build -j
 ./build/gemm_benchmark 8      # ...or a specific thread count
 ./build/gemm_tests            # correctness, 1575 assertions
 ./build/gemm_tests "[tensor]" # ...or one tag: tensor, view, ops, gemm
-.venv/bin/pytest tests/python # bindings, autograd, NumPy cross-check
+.venv/bin/pytest tests/python # bindings, autograd, gradients: 427 tests
 ctest --test-dir build        # both suites together
 ```
 
@@ -472,9 +480,9 @@ Worth knowing: ASan cannot catch a column overrun on any row except the last,
 because it lands in the next row of the same allocation. The numeric comparison
 is what actually catches those.
 
-The graph tests are mostly structural. Gradient checking against finite
-differences is a later phase; for now gradients are compared against
-hand-derived NumPy expressions. The last of them is a two-layer MLP — matmul,
+The graph tests themselves are mostly structural, and the gradients in them are
+compared against hand-derived NumPy expressions; finite differences and the
+PyTorch cross-check are below. The last of them is a two-layer MLP — matmul,
 bias broadcast, relu, matmul, loss — run forward and backward and checked
 against a NumPy pass on every parameter. Three others carry weight out of
 proportion to their size. The diamond pins the walk
@@ -497,6 +505,85 @@ keeping: a node saving its own output *wrapper* instead of the raw buffer fails
 nothing at all except the lifetime test, which is the whole argument for having
 one.
 
+### Gradient checking
+
+Every test above compares a gradient against a hand-derived NumPy expression —
+the same calculus that produced the implementation, written out twice. It
+catches a typo and cannot catch a mistake in the derivation. So gradients are
+now also checked against finite differences, which know nothing about calculus,
+and against PyTorch.
+
+The textbook recipe does not survive contact with a float32 engine. Central
+differences at `h = 1e-5` report a **correct** gradient as 4e-2 wrong here,
+because subtracting two nearly-equal float32s destroys the digits the answer
+lives in. `h` is squeezed from both sides:
+
+| `h` | `sum(x*x*x)` | `matmul`, seeded | `relu`, margin 1e-2 |
+|---|---|---|---|
+| 1e-1 | 1.0e-2 | 6.0e-7 | **4.5e-1** |
+| 1e-2 | 9.9e-5 | 7.5e-6 | 9.5e-7 |
+| **3e-3** | **1.9e-5** | **1.7e-5** | **7.0e-6** |
+| 1e-3 | 6.8e-5 | 5.3e-5 | 1.3e-5 |
+| 1e-5 | 3.4e-3 | 5.1e-3 | 1.4e-3 |
+
+Below, cancellation: the floor goes as `eps*|f|/h`. Above, the relu kink — a
+step that straddles zero measures a slope that exists nowhere, which is the 45%
+in the top right. `h = 3e-3` sits between them and at the bottom of the bowl for
+the one case with a real `h^2` truncation term.
+
+**The tolerance is computed, not chosen.** The noise floor turned out not to be
+a property of the op at all. Summing `N` floats, where the gradient is
+identically 1.0 for every `N`, the floor still grows with `N`:
+
+| N | 6 | 24 | 96 | 384 | 1536 | 6144 |
+|---|---|---|---|---|---|---|
+| \|f\| | 2.1 | 5.0 | 7.9 | 13.3 | 33.6 | 83.1 |
+| floor | 1.3e-5 | 8.6e-5 | 2.3e-4 | 5.5e-4 | 7.2e-4 | 2.0e-3 |
+
+It tracks `|f|`, the magnitude of the numbers being subtracted, and `eps*|f|/h`
+predicts it within 2–3x across a thousandfold range. That explains every
+anomaly in the per-op table — `matmul` with `K=9` is noisier than `K=3` for the
+same reason a longer sum is. So the tolerance is derived per check as
+`max(3*eps*|f|/h, 2e-5)`, with a hard ceiling that raises rather than passing:
+a case too large to resolve in float32 has to shrink, and quietly widening the
+bound instead is how a check stops catching anything.
+
+This matters because a gradient wrong by a factor of `(1+e)` produces exactly
+`e` relative error — **the tolerance is the detection threshold**, the blind
+spot stated as a number. A single global tolerance would set it for every op at
+once, at the width the worst one needs.
+
+Then PyTorch, in float64, as the tighter oracle:
+
+| | agreement |
+|---|---|
+| finite differences, best case | 2e-5 |
+| torch float64 vs this engine | **1.2e-7** |
+
+which is float32 machine epsilon — the engine is as accurate as its storage
+permits — and 170x tighter than any finite difference can be. Where the engine
+diverges from torch deliberately, the torch side is constructed to match rather
+than assumed: `.expand()` instead of implicit broadcasting, `keepdim=True`
+because `sum` keeps rank with 1s.
+
+Mutation results. Swapping either transpose in matmul's backward fails 15
+tests; dropping the `expand` from sum's backward fails 9; setting `h` to the
+1e-5 the textbook asks for fails 32. Two came back the other way and are worth
+more than the ones that passed. Holding relu inputs off the kink catches
+nothing — a uniform draw lands inside the step on 1 seed in 200, so the margin
+removes a rare flake rather than a bug, and the explicit on-the-kink test is
+what proves the mechanism. And finite differences cannot see the relu
+subgradient at exactly zero at all, since a symmetric difference never samples
+it; only the torch cross-check pins that down.
+
+Finding the gradient checker found one real bug, before any test was written.
+`matmul` could not be differentiated when `M == 1` — batch size one, which the
+`nn` layer would have hit on its first step. `a.T` of a `{1,K}` is `{K,1}`,
+which *is* contiguous, since the stride of an extent-1 dimension is never
+stepped. But `gemm` wants `stride(1) == 1` literally, so `contiguous()` no-opped
+and `gemm` rejected the operand. Two definitions of contiguous that agree
+everywhere except on a dimension of extent one.
+
 ## Roadmap
 
 - [x] Generalise the GEMM library to arbitrary M, N and K
@@ -505,7 +592,7 @@ one.
 - [x] pybind11 bindings
 - [x] Autograd graph and `backward()`
 - [x] Backward kernels
-- [ ] Gradient checking against finite differences and PyTorch
+- [x] Gradient checking against finite differences and PyTorch
 - [ ] `nn` layers, loss functions, SGD
 - [ ] Train an MLP on MNIST against a PyTorch baseline
 
@@ -520,4 +607,5 @@ The history of that work is preserved in this repo's commits.
 Everything since then is mine: generalising all six kernels to arbitrary
 shapes, the leading-dimension rework, the test harness, the benchmarking
 above, the port to C++, the tensor type, the pybind11 bindings, the autograd
-graph, and the backward operations on top of it.
+graph, the backward operations on top of it, and the gradient validation
+that checks them.
