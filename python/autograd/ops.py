@@ -54,6 +54,17 @@ class Mul(Function):
         return (grad_a, grad_b)
 
 
+def _unit_inner(t: _core.Tensor) -> _core.Tensor:
+    """Force the literal unit inner stride gemm checks for.
+
+    is_contiguous() ignores the stride of an extent-1 dimension, and it is right
+    to - that dimension is never stepped. But gemm wants stride(1) == 1
+    literally, so a {5,1} view of a row reports contiguous with strides (1,5),
+    contiguous() no-ops, and gemm rejects it anyway. Only a copy settles it.
+    """
+    return t if t.strides[-1] == 1 else t.clone()
+
+
 def _gemm_into(
     a: _core.Tensor,
     b: _core.Tensor,
@@ -64,9 +75,8 @@ def _gemm_into(
 ) -> None:
     """out += (a or a.T) @ (b or b.T). The graph's ONLY _core.gemm call site.
 
-    Both inputs are materialised contiguous when they are not already - gemm
-    rejects a non-unit inner stride on all three operands, and an incoming
-    gradient is not guaranteed contiguous.
+    Both inputs are forced to a unit inner stride - gemm rejects anything else on
+    all three operands, and an incoming gradient is not guaranteed contiguous.
 
     `out` is NOT contiguified and raises instead. Contiguifying it would hand
     gemm a temporary copy, fill that, drop it, and leave the caller's buffer
@@ -86,8 +96,8 @@ def _gemm_into(
     if tb:
         b = b.transpose(0, 1)
 
-    a = a.contiguous()
-    b = b.contiguous()
+    a = _unit_inner(a.contiguous())
+    b = _unit_inner(b.contiguous())
 
     _core.gemm(a, b, out)
 

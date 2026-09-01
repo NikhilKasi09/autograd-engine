@@ -469,6 +469,40 @@ def test_matmul_backward_reads_a_strided_incoming_gradient() -> None:
     assert np.allclose(np.asarray(y.grad), a.T @ dout.T, rtol=1e-6, atol=1e-6)
 
 
+def test_matmul_with_a_single_row_can_be_differentiated() -> None:
+    """Regression: {1,K} @ {K,N} raised in backward for every K > 1.
+
+    dB = a.T @ dout, and a.T of a {1,K} is {K,1}. That IS contiguous - the
+    stride of an extent-1 dimension is never stepped - so contiguous() no-opped,
+    but gemm wants stride(1) == 1 literally and rejected it. Two definitions of
+    contiguous that agree everywhere except on a dimension of extent one.
+
+    M == 1 is batch size one, which the nn layer hits on its first step.
+    """
+    a = np.array([[1.0, 2.0, 3.0, 4.0, 5.0]])
+    b = np.arange(15.0).reshape(5, 3)
+    dout = np.array([[1.0, 2.0, 3.0]])
+
+    x, w = leaf(a), leaf(b)
+    autograd.matmul(x, w).backward(_core.from_numpy(np.ascontiguousarray(dout, np.float32)))
+
+    assert np.allclose(np.asarray(x.grad), dout @ b.T, rtol=1e-6, atol=1e-6)
+    assert np.allclose(np.asarray(w.grad), a.T @ dout, rtol=1e-6, atol=1e-6)
+
+
+def test_matmul_with_a_single_inner_dimension_can_be_differentiated() -> None:
+    """The mirror of the above: K == 1 breaks dA = dout @ b.T the same way."""
+    a = np.array([[1.0], [2.0], [3.0]])
+    b = np.array([[4.0, 5.0, 6.0]])
+    dout = np.ones((3, 3))
+
+    x, w = leaf(a), leaf(b)
+    autograd.matmul(x, w).backward(_core.from_numpy(np.ascontiguousarray(dout, np.float32)))
+
+    assert np.allclose(np.asarray(x.grad), dout @ b.T, rtol=1e-6, atol=1e-6)
+    assert np.allclose(np.asarray(w.grad), a.T @ dout, rtol=1e-6, atol=1e-6)
+
+
 def test_matmul_leaves_a_frozen_operand_without_a_gradient() -> None:
     x = leaf(np.ones((2, 3)), requires_grad=True)
     y = leaf(np.ones((3, 4)), requires_grad=False)
