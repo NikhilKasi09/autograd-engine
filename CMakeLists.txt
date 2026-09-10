@@ -156,6 +156,7 @@ add_library(gemm_core STATIC
     src/gemm_simd.cpp
     src/gemm_tiled.cpp
     src/gemm_tiled_simd.cpp
+    src/random.cpp
     src/tensor.cpp
     src/tensor_ops.cpp
     src/validate.cpp
@@ -202,6 +203,7 @@ FetchContent_MakeAvailable(Catch2)
 # hidden by default because it costs a second.
 add_executable(gemm_tests
     tests/cpp/test_gemm.cpp
+    tests/cpp/test_random.cpp
     tests/cpp/test_tensor.cpp
     tests/cpp/test_tensor_ops.cpp
 )
