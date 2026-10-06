@@ -7,27 +7,27 @@ middle:
 2. An autograd engine that records tensor operations and walks the graph
    backwards to get gradients.
 
-The plan is for C++ to own tensor storage and the forward kernels, and Python
-to own the graph and the backward pass, joined with pybind11.
+C++ owns tensor storage and the forward kernels, Python owns the graph and the
+backward pass, and pybind11 joins them.
 
 No BLAS library is used anywhere. Writing the kernel is the point.
 
 ## Where it is now
 
-The GEMM library is finished, handles arbitrary shapes, and has been ported
-from C to C++. The tensor type it runs on is finished too, and it is now
-exposed to Python: the tensor, its views, the elementwise ops and all six GEMM
-kernels are callable from there, sharing memory with NumPy rather than copying
-through it. The autograd half has started: there is a graph, a topological
-sort and a working `backward()`, differentiating addition and elementwise
-multiplication. The rest of the operations have landed since: matmul, relu, a
-reduction and a broadcast, which between them are enough to run a small MLP
-forward and backward. Those gradients are now checked against finite
-differences and cross-checked against PyTorch, rather than against expressions
-derived by the same hand that wrote them. And there is now something to train:
-a `Linear` layer, two losses and an SGD optimiser, which between them take an
-MLP from random weights to 100% on a small classification problem and match
-PyTorch parameter for parameter after five steps.
+Every phase on the roadmap is done. From the bottom up:
+
+- **A GEMM library** of six kernels over arbitrary shapes, the fastest within
+  4% of OpenBLAS at 256 and running an FMA every cycle.
+- **A tensor type** with strides and views, so a transpose, a slice and a
+  broadcast are all a second handle onto one buffer.
+- **pybind11 bindings** that share memory with NumPy rather than copying
+  through it.
+- **An autograd graph** with a topological sort and a `backward()` over seven
+  operations, checked against finite differences and against PyTorch.
+- **Layers, two losses and SGD**, enough to train a model.
+- **MNIST.** A 784-128-10 MLP reaches 97.4 to 97.6% test accuracy in ten
+  epochs, follows PyTorch's loss step for step, and after three fixes found by
+  profiling trains within noise of single-threaded PyTorch on that model.
 
 The port replaced `posix_memalign`/`free` with RAII storage that owns its
 aligned buffer, pthreads with `std::jthread`, the Makefile with CMake, and the
@@ -203,11 +203,20 @@ cannot start from zero — an all-negative row would come back as 0 — so
 zero instead fails exactly one test in each suite, the all-negative row, and
 passes everything else.
 
-These are scalar, on purpose. Elementwise work is memory bandwidth bound rather
-than compute bound, so vectorising it buys a fraction of what it buys in GEMM,
-and a stride-general walk that has to handle stride 0 does not vectorise
-cleanly without a separate contiguous fast path. That fast path is worth
-writing when a training loop says so, and not before.
+These were scalar until a training loop said otherwise. The reasoning was that
+elementwise work is memory bandwidth bound, so vectorising it buys a fraction
+of what it buys in GEMM, and a stride-general walk that has to handle stride 0
+does not vectorise without a separate contiguous fast path. That fast path was
+left until something measured needed it.
+
+MNIST needed it, and for a reason worse than missing vectorisation. The walk
+padded every shape out to rank 4 on the right, so a matrix had its columns in
+the second of four loops and the innermost loop ran once per element. Each
+element paid a four-term offset sum per input. The kernels now pad on the left,
+work out where a row starts once, and take a plain contiguous loop whenever
+every input steps by one along it. A transposed or broadcast input still takes
+the strided loop. `add_into` on a 784x128 went from 100 microseconds to 6. See
+"Training MNIST" for what that was worth.
 
 `sum` accumulates in a double and returns a float. NumPy sums pairwise, and a
 plain left-to-right float32 accumulation over 100000 elements drifts 1.4e-4
@@ -284,6 +293,13 @@ site in the graph. It would not: there is only one. Every GEMM the graph runs
 goes through a single private helper that owns the transposing, so `transa`
 becomes a change to that function and nothing else — a decision a profile can
 drive rather than one that had to be guessed now.
+
+The profile has since been taken, and it said no. On MNIST the copy of the
+transposed input batch cost 226 microseconds a step, more than both large
+matrix products together. But the cost was in the copy routine, not in copying:
+`clone()` rebuilt a multi-index with a divide per dimension for every element.
+Walking it a row at a time brought that copy down to 14 microseconds, 3% of a
+step, and there was nothing left for `transa` to save.
 
 ## The autograd graph
 
@@ -372,6 +388,15 @@ target shape is not something you differentiate. Positional arguments are graph
 tensors and receive gradients; keyword arguments go to the node's constructor
 and the backward walk never sees them.
 
+**A node computes only the gradients somebody asked for.** It records which of
+its inputs required a gradient when it ran, and its backward returns nothing
+for the rest. This was not the original rule, which was that backward returns
+a gradient for every input and the walk decides who keeps one. That is simpler
+and costs nothing while every input is small. It stopped being free on MNIST:
+a layer's input is data, and the first layer was computing the gradient of the
+loss with respect to the pixels — a matrix product as large as its own forward
+pass — and throwing it away.
+
 Summing a `{2,3}` gives a `{1,1}`, not a bare scalar. Keeping the rank is what
 makes the backward a bare `expand` with no allocation — at rank 1 it would need
 a reshape first, and `reshape` refuses a non-contiguous tensor.
@@ -449,9 +474,112 @@ would save that allocation and corrupt the gradient.
 
 **Inference needs no `no_grad()`.** A forward pass through live parameters
 does record a graph, but recording is cheap next to the arithmetic: on a
-784-128-10 MLP at batch 64, 144.6 µs with the graph against 144.7 µs with
+784-128-10 MLP at batch 64, 127.7 µs with the graph against 124.1 µs with
 detached parameters, medians of 7, ranges overlapping. The graph is freed when
 the output is dropped.
+
+## Training MNIST
+
+The demonstration the rest was built for: a 784-128-10 MLP, plain SGD at a
+learning rate of 0.1, batches of 64, ten epochs. Nothing was tuned; those
+numbers were fixed before the first run.
+
+```bash
+.venv/bin/python examples/mnist_data.py     # once: download and verify
+.venv/bin/python examples/mnist_train.py    # train, print accuracy per epoch
+.venv/bin/python examples/mnist_torch.py    # the same run in PyTorch
+```
+
+NumPy loads the data, shuffles it and counts the correct answers. Every number
+the model computes comes from the engine.
+
+### Against PyTorch
+
+The PyTorch run is built to match rather than assumed to: it starts from this
+engine's own initial weights, transposed into PyTorch's layout, and is fed the
+same batches in the same order. What is left to differ is the arithmetic.
+
+| seed | this engine | PyTorch |
+|---|---|---|
+| 0 | 97.39% | 97.36% |
+| 1 | 97.50% | 97.51% |
+| 2 | 97.42% | 97.40% |
+| 3 | 97.63% | 97.63% |
+| 4 | 97.50% | 97.47% |
+
+Test accuracy after ten epochs. After one epoch the two agree to all four
+digits on every seed.
+
+The stronger check is the loss, step by step. For the first 300 steps the two
+agree to 5.6e-7 relative, which is float32 rounding. They part company after
+about an epoch, as any two float32 implementations must once a rounding
+difference flips a relu, and they end within 0.03 points of each other.
+
+### Where the time went
+
+The first run took 1.69 seconds an epoch against PyTorch's 0.36: 4.7 times
+slower. The expectation, written down in advance, was that GEMM would dominate
+and the fix would be packing. A profile of one training step said otherwise:
+
+| | share of a step |
+|---|---|
+| copying transposed operands | 39% |
+| `add_into` | 21% |
+| GEMM, all six calls | 17% |
+| `scale` | 6% |
+| Python, between the kernel calls | 10% |
+
+The matrix products were under a fifth of the step. The rest was glue, and
+three fixes took it out, each timed against the build before it.
+
+| fix | seconds per epoch | |
+|---|---|---|
+| as first run | 1.73 | |
+| skip gradients nobody asked for | 1.13 | 1.53x |
+| walk elementwise ops a row at a time | 0.63 | 1.81x |
+| copy a strided tensor a row at a time | 0.39 | 1.68x |
+
+**Skipping unwanted gradients** removed a whole matrix product. The first layer
+was differentiating the loss with respect to the input pixels: a GEMM the size
+of its own forward pass, plus a transposed copy of the weight to feed it.
+
+**The elementwise walk** had its loops in the wrong order for a matrix, as
+described under "Elementwise ops". This was the largest single win.
+
+**The strided copy** is the one that changed a plan. The intention had been to
+give GEMM `transa` and `transb` flags. Fixing the copy made that unnecessary.
+
+Two more fixes were on the list, an `axpy` kernel for the optimiser and
+borrowing a gradient instead of copying it. After the elementwise fix they
+were worth 1% and 3% of a step, and were dropped.
+
+### The result
+
+All four run alternately in one session, seven runs each, seconds per epoch:
+
+| | median | range |
+|---|---|---|
+| this engine, as first run | 1.686 | 1.632 to 1.729 |
+| this engine, now | 0.370 | 0.362 to 0.391 |
+| PyTorch, 1 thread | 0.361 | 0.350 to 0.380 |
+| PyTorch, 12 threads | 0.379 | 0.352 to 0.439 |
+
+4.6 times faster than it started, and inside PyTorch's range. Two caveats
+belong next to that. It is one workload, and a small one: at batch 64 the
+largest matrix is 784x128, where this kernel is at its best and where
+PyTorch's threads have nothing to do. And PyTorch is carrying far more
+generality per call than this is.
+
+What is left of a step is about 60% GEMM, and the two large products run at
+133 GFLOP/s, which is this machine's single-core limit. So packing, the one
+known gap in the kernel, would buy nothing on this model: it helps from about
+1024 upwards and nothing here is that big. It is still the right next piece of
+work for the kernel. It is not what MNIST was waiting for.
+
+Timing on this machine drifts by up to 20% between sessions, so every
+comparison above comes from builds alternating in a single run.
+`examples/mnist_bench.py --compare --other-root <tree>` does that for any two
+builds, and `--profile` produces the table of where a step goes.
 
 ## Building
 
@@ -469,14 +597,18 @@ cmake --build build -j
 
 ./build/gemm_benchmark        # the ladder, all hardware threads
 ./build/gemm_benchmark 8      # ...or a specific thread count
-./build/gemm_tests            # correctness, 1830 assertions
+./build/gemm_tests            # correctness, 1907 assertions
 ./build/gemm_tests "[tensor]" # ...or one tag: tensor, view, ops, random, gemm
-.venv/bin/pytest tests/python # bindings, autograd, gradients, training: 565 tests
+.venv/bin/pytest tests/python # bindings, autograd, gradients, training: 597 tests
 ctest --test-dir build        # both suites together
 ```
 
 `ctest` does not build, so the full command is
 `cmake --build build && ctest --test-dir build`.
+
+Five of the Python tests train on the real MNIST files and skip until they are
+downloaded with `.venv/bin/python examples/mnist_data.py`, which puts 11 MB
+under `data/`. The pytest header says whether they ran.
 
 Each build tree writes its own complete `autograd` package — `_core` plus a
 copy of the Python package — so a tree can be tested without disturbing any
@@ -710,6 +842,29 @@ A `Linear` that remembers its last output fails nothing except the lifetime
 test, which runs one full training step and requires every activation to be
 freed by reference counting alone.
 
+### MNIST
+
+The loader is tested without the dataset: its tests write their own small IDX
+files, 2x3 images with every pixel different, so a swapped height and width or
+a header read in the wrong byte order shows up as wrong values. Downloads are
+tested against `file://` mirrors. A file only takes its real name once its
+SHA-256 has matched.
+
+The tests on the real data assert thresholds that were measured over five
+seeds first: a first loss within 0.1 of ln 10, over 90% after one epoch where
+the worst seed scored 91.97%, and a run that repeats to the bit from its seed.
+
+Mutation results. Shuffling the images and the labels with two different
+permutations still produces well-formed batches, and drops accuracy to 12%.
+Forgetting `zero_grad` drops it to 10%. A learning rate 1% too large is
+invisible to the accuracy and is caught by the step-for-step comparison with
+PyTorch, on 299 steps of 300.
+
+The fixes were mutated too, and one result is worth keeping. Putting the
+elementwise padding back on the right passes every test in both suites,
+because it gives the same answers and is only slower. Nothing but the timing
+guards it.
+
 ## Roadmap
 
 - [x] Generalise the GEMM library to arbitrary M, N and K
@@ -720,10 +875,11 @@ freed by reference counting alone.
 - [x] Backward kernels
 - [x] Gradient checking against finite differences and PyTorch
 - [x] `nn` layers, loss functions, SGD
-- [ ] Train an MLP on MNIST against a PyTorch baseline
+- [x] Train an MLP on MNIST against a PyTorch baseline
 
-Packing is not on the list but is worth more than anything on it for the
-performance story, so it may jump the queue.
+Packing is the next piece of work. It closes the gap to OpenBLAS above 1024,
+and the MNIST profile showed it was right to leave it until after: nothing in
+that model is large enough to need it.
 
 ## Origins
 
@@ -734,4 +890,5 @@ Everything since then is mine: generalising all six kernels to arbitrary
 shapes, the leading-dimension rework, the test harness, the benchmarking
 above, the port to C++, the tensor type, the pybind11 bindings, the autograd
 graph, the backward operations on top of it, the gradient validation that
-checks them, and the layers, losses and optimiser that train on them.
+checks them, the layers, losses and optimiser that train on them, and the MNIST
+run with the profiling that followed it.
