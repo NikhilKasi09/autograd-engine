@@ -24,7 +24,10 @@ multiplication. The rest of the operations have landed since: matmul, relu, a
 reduction and a broadcast, which between them are enough to run a small MLP
 forward and backward. Those gradients are now checked against finite
 differences and cross-checked against PyTorch, rather than against expressions
-derived by the same hand that wrote them.
+derived by the same hand that wrote them. And there is now something to train:
+a `Linear` layer, two losses and an SGD optimiser, which between them take an
+MLP from random weights to 100% on a small classification problem and match
+PyTorch parameter for parameter after five steps.
 
 The port replaced `posix_memalign`/`free` with RAII storage that owns its
 aligned buffer, pthreads with `std::jthread`, the Makefile with CMake, and the
@@ -180,8 +183,8 @@ impossible to forget rather than merely conventional.
 
 ## Elementwise ops
 
-`add`, `mul`, `scale`, `relu`, `relu_backward`, `add_into`, `sum_into` and
-`sum`. Inputs may have any strides, so a transposed view or a broadcast is read
+`add`, `mul`, `scale`, `relu`, `exp`, `log`, `relu_backward`, `add_into`,
+`sum_into`, `reduce_max` and `sum`. Inputs may have any strides, so a transposed view or a broadcast is read
 where it lies; the output has to be contiguous. Shapes have to match exactly.
 There is no implicit broadcasting: a caller who wants one writes `expand` at
 the call site, where it is visible.
@@ -192,6 +195,13 @@ write dimension stride 0 so many floats land on one. Collapsing a `{4,3}` onto
 a `{1,3}` is a bias gradient. It looks like `add_into` and is not — `add_into`
 walks its destination with a counter, which only works because its shapes
 match, and keeping that counter here writes past the end of the buffer.
+
+`reduce_max` takes `sum_into`'s shape rules and the opposite write contract.
+`sum_into` accumulates, so its caller zeroes the destination first. A max
+cannot start from zero — an all-negative row would come back as 0 — so
+`reduce_max` seeds its own output with `-inf` and overwrites. Seeding it with
+zero instead fails exactly one test in each suite, the all-negative row, and
+passes everything else.
 
 These are scalar, on purpose. Elementwise work is memory bandwidth bound rather
 than compute bound, so vectorising it buys a fraction of what it buys in GEMM,
@@ -344,10 +354,11 @@ points forward. Accumulation buffers take their shape from the tensor they
 belong to rather than from the incoming gradient, so a wrong-shaped gradient is
 rejected by `add_into` instead of propagating quietly into `.grad`.
 
-Six operations: `add`, `mul`, `matmul`, `relu`, `sum` and `expand`. The first
-two arrived without touching C++ at all, which was why they were chosen. The
-rest needed two new kernels between them and no more, because most of the work
-was already sitting in the tensor type.
+Seven operations: `add`, `mul`, `matmul`, `relu`, `sum`, `expand` and `scale`.
+The first two arrived without touching C++ at all, which was why they were
+chosen. The next four needed two new kernels between them and no more, because
+most of the work was already sitting in the tensor type. `scale` came last and
+free — its kernel had been bound and unused since the bindings landed.
 
 **`sum` and `expand` are one operation read in opposite directions.** `sum`
 allocates going forward and returns a view coming back; `expand` returns a view
@@ -365,6 +376,83 @@ Summing a `{2,3}` gives a `{1,1}`, not a bare scalar. Keeping the rank is what
 makes the backward a bare `expand` with no allocation — at rank 1 it would need
 a reshape first, and `reshape` refuses a non-contiguous tensor.
 
+## The nn layer
+
+Everything above computes a gradient. This is what uses one.
+
+```python
+import autograd
+from autograd import _core, nn, optim
+
+class MLP(nn.Module):
+    def __init__(self, generator):
+        self.fc1 = nn.Linear(784, 128, generator=generator)
+        self.fc2 = nn.Linear(128, 10, generator=generator)
+
+    def forward(self, x):
+        return self.fc2(autograd.relu(self.fc1(x)))
+
+model = MLP(_core.Generator(seed=0))
+opt = optim.SGD(model.parameters(), lr=0.1)
+
+for x, target in batches:                 # target is one-hot, {batch, 10}
+    opt.zero_grad()
+    loss = nn.cross_entropy(model(x), target)
+    loss.backward()
+    opt.step()
+```
+
+**A parameter is a type, and a module finds its parameters by looking.**
+`Parameter` is a `Tensor` that requires a gradient by default and exists mostly
+to be recognised. `Module.parameters()` walks the module's own attributes,
+yields each `Parameter` and recurses into each child `Module`. There is no
+registry and no `__setattr__` hook, which is what PyTorch uses; assigning an
+attribute is just assigning an attribute. The one subtlety is that the set of
+already-seen parameters is passed down the whole recursion rather than created
+per module, or a weight shared between two layers would be listed twice and
+stepped twice.
+
+**A module is only a holder.** `Linear.forward` is one line calling the free
+function `nn.linear(x, w, b)`. That is not tidiness: the finite-difference
+checker rebuilds its inputs for every perturbation, so arithmetic locked inside
+an object with fixed parameters could not be checked at all.
+
+**Weights are stored `{in, out}`**, the transpose of PyTorch's `{out, in}`.
+PyTorch computes `x @ W.T`; here that transpose would be a copy on every
+forward pass, for the reason given under "The transpose cost". Stored this way
+round the forward is a plain `x @ w`. Weights start uniform on
+`±1/sqrt(in)`, which keeps the size of a layer's output roughly independent of
+its width, and the bias starts at zero.
+
+**Is a loss an operation or a function? Both, and for a reason.** `mse_loss`
+is a function: it is `add`, `mul`, `sum` and `scale` composed, with no node of
+its own, and cost no C++. `cross_entropy` is one fused node. Built from
+separate `exp`, `log` and divide operations it overflows as soon as a logit
+passes about 88, since `exp` of that is infinite in float32. Fused, each row
+is shifted by its own maximum first, so every `exp` is of something at most
+zero, and the gradient collapses to `softmax - target` with nothing
+transcendental left to differentiate. Logits of ±1000 give the exact loss.
+
+Targets are one-hot rows rather than class indices, because there is no
+integer tensor here to hold an index.
+
+**Initial weights come from a seeded generator, not from NumPy.** Nothing in
+the engine imports NumPy to compute anything. `_core.Generator` owns a
+`std::mt19937_64`, so a run reproduces from its seed to the bit, and two layers
+built from one generator draw from one stream. It cannot be copied: a copy
+would be a second generator emitting the same numbers, and two layers
+initialised from it would be identical.
+
+**`SGD.step` writes into the parameter's own buffer.** `p -= lr * grad`, with
+`-lr * grad` built in a scratch buffer first. Scaling the gradient in place
+would save that allocation and corrupt the gradient.
+
+**Inference needs no `no_grad()`.** A forward pass through live parameters
+does record a graph, but recording is cheap next to the arithmetic: on a
+784-128-10 MLP at batch 64, 144.6 µs with the graph against 144.7 µs with
+detached parameters, medians of 7, ranges overlapping. The graph is freed when
+the output is dropped.
+
 ## Building
 
 ```bash
@@ -381,9 +469,9 @@ cmake --build build -j
 
 ./build/gemm_benchmark        # the ladder, all hardware threads
 ./build/gemm_benchmark 8      # ...or a specific thread count
-./build/gemm_tests            # correctness, 1575 assertions
-./build/gemm_tests "[tensor]" # ...or one tag: tensor, view, ops, gemm
-.venv/bin/pytest tests/python # bindings, autograd, gradients: 427 tests
+./build/gemm_tests            # correctness, 1830 assertions
+./build/gemm_tests "[tensor]" # ...or one tag: tensor, view, ops, random, gemm
+.venv/bin/pytest tests/python # bindings, autograd, gradients, training: 565 tests
 ctest --test-dir build        # both suites together
 ```
 
@@ -584,6 +672,44 @@ stepped. But `gemm` wants `stride(1) == 1` literally, so `contiguous()` no-opped
 and `gemm` rejected the operand. Two definitions of contiguous that agree
 everywhere except on a dimension of extent one.
 
+### Training
+
+The last layer of tests builds a model the way a user would and trains it.
+
+| | result |
+|---|---|
+| MLP on three clusters, 60 steps | loss 1.14 → 0.009, 100% |
+| the same, loss on every step | strictly decreasing |
+| MLP on XOR, 400 steps | loss 0.005, 4 of 4 |
+| `Linear` under MSE, 200 steps | weights recovered to 6 digits |
+| five SGD steps against PyTorch | parameters agree to 1e-5 |
+
+XOR is there because it is not linearly separable: it only trains if gradient
+is reaching the first layer through the relu. The PyTorch comparison is the
+only oracle for the optimiser — same weights, same batch, five steps each.
+
+Cross-entropy was the first function here that is not piecewise linear or
+bilinear, so the finite-difference step was swept again before its checks were
+written rather than assumed to carry over. It does: over 120 cases the worst
+error was 0.54 of the derived tolerance.
+
+Writing the loss found a bug in the engine. An operation may return `None`
+from its backward for an input that is not differentiable, and that path had
+been documented since the graph was first built — but no operation had ever
+used it. The target of a loss was the first, and the walk raised `KeyError` on
+reaching it.
+
+Mutation results. A cross-entropy backward that ignores the gradient arriving
+from above is right whenever the loss is the last thing in the graph, and the
+full-Jacobian check passes it, because that check seeds a scalar output with
+exactly 1. It is caught by seeding with anything else, by scaling the loss, and
+by PyTorch — 8 tests. Dropping the shift by the row maximum fails one test, the
+±1000 logits. An optimiser that holds the generator `parameters()` returns
+steps once and then does nothing forever; the test asserts on the second step.
+A `Linear` that remembers its last output fails nothing except the lifetime
+test, which runs one full training step and requires every activation to be
+freed by reference counting alone.
+
 ## Roadmap
 
 - [x] Generalise the GEMM library to arbitrary M, N and K
@@ -593,7 +719,7 @@ everywhere except on a dimension of extent one.
 - [x] Autograd graph and `backward()`
 - [x] Backward kernels
 - [x] Gradient checking against finite differences and PyTorch
-- [ ] `nn` layers, loss functions, SGD
+- [x] `nn` layers, loss functions, SGD
 - [ ] Train an MLP on MNIST against a PyTorch baseline
 
 Packing is not on the list but is worth more than anything on it for the
@@ -607,5 +733,5 @@ The history of that work is preserved in this repo's commits.
 Everything since then is mine: generalising all six kernels to arbitrary
 shapes, the leading-dimension rework, the test harness, the benchmarking
 above, the port to C++, the tensor type, the pybind11 bindings, the autograd
-graph, the backward operations on top of it, and the gradient validation
-that checks them.
+graph, the backward operations on top of it, the gradient validation that
+checks them, and the layers, losses and optimiser that train on them.
