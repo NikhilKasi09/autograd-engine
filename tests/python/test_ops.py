@@ -457,3 +457,131 @@ def test_sum_accumulates_in_double() -> None:
 
 def test_sum_of_a_single_element() -> None:
     assert _core.sum(_core.zeros([1])) == 0.0
+
+
+# --------------------------------------------------------------------------
+# exp, log
+# --------------------------------------------------------------------------
+
+
+def test_exp_and_log_match_numpy() -> None:
+    a = np.array([[0.0, 1.0, -1.0], [2.0, -3.0, 0.5]], dtype=np.float32)
+
+    e = _core.zeros([2, 3])
+    _core.exp(tensor(a), e)
+    assert np.allclose(np.asarray(e), np.exp(a), rtol=1e-6, atol=0.0)
+
+    back = _core.zeros([2, 3])
+    _core.log(e, back)
+    assert np.allclose(np.asarray(back), a, rtol=1e-6, atol=1e-6)
+
+
+def test_exp_reads_a_transposed_input() -> None:
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+
+    out = _core.zeros([3, 2])
+    _core.exp(tensor(a).transpose(0, 1), out)
+
+    # Elementwise, so a flat walk shows up as the right values in the wrong order.
+    assert np.allclose(np.asarray(out), np.exp(a.T), rtol=1e-6, atol=0.0)
+
+
+def test_log_reads_an_expanded_input() -> None:
+    row = np.array([[1.0, 2.0, 4.0]], dtype=np.float32)
+    expanded = tensor(row).expand([2, 3])
+    assert expanded.strides[0] == 0
+
+    out = _core.zeros([2, 3])
+    _core.log(expanded, out)
+
+    assert np.allclose(np.asarray(out), np.log(np.broadcast_to(row, (2, 3))), rtol=1e-6)
+
+
+@pytest.mark.parametrize("op", ["exp", "log"])
+def test_exp_and_log_reject_a_non_contiguous_output(op: str) -> None:
+    tr_out = _core.zeros([3, 2]).transpose(0, 1)
+
+    with pytest.raises(ValueError, match="output must be contiguous"):
+        getattr(_core, op)(_core.zeros([2, 3]), tr_out)
+
+
+@pytest.mark.parametrize("op", ["exp", "log"])
+def test_exp_and_log_reject_a_mismatched_output_shape(op: str) -> None:
+    with pytest.raises(ValueError, match="shape mismatch"):
+        getattr(_core, op)(_core.zeros([2, 3]), _core.zeros([3, 2]))
+
+
+# --------------------------------------------------------------------------
+# reduce_max - sum_into's shape rules, the opposite write contract
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "out_shape, axis",
+    [([1, 3], 0), ([2, 1], 1)],
+    ids=["down-the-rows", "across-the-columns"],
+)
+def test_reduce_max_collapses_one_axis(out_shape: list[int], axis: int) -> None:
+    a = np.array([[1.0, 7.0, 3.0], [9.0, 2.0, 4.0]], dtype=np.float32)
+
+    out = _core.zeros(out_shape)
+    _core.reduce_max(tensor(a), out)
+
+    assert np.array_equal(np.asarray(out), a.max(axis=axis, keepdims=True))
+
+
+def test_reduce_max_of_an_all_negative_row_is_negative() -> None:
+    """Seeding the output with zero instead of -inf returns 0 here, and passes
+    every other test in this section."""
+    a = np.array([[-5.0, -2.0, -9.0], [-1.0, -4.0, -3.0]], dtype=np.float32)
+
+    out = _core.zeros([2, 1])
+    _core.reduce_max(tensor(a), out)
+
+    assert np.array_equal(np.asarray(out), [[-2.0], [-1.0]])
+
+
+def test_reduce_max_overwrites_a_prefilled_output() -> None:
+    """The opposite of sum_into, which accumulates."""
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+    out = tensor(np.full((2, 1), 100.0, dtype=np.float32))
+
+    _core.reduce_max(tensor(a), out)
+
+    assert np.array_equal(np.asarray(out), [[2.0], [5.0]])
+
+
+def test_reduce_max_reads_a_transposed_input() -> None:
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+
+    out = _core.zeros([3, 1])
+    _core.reduce_max(tensor(a).transpose(0, 1), out)
+
+    # A flat walk pairs the buffer as {0 1} {2 3} {4 5} and returns [1, 3, 5].
+    assert np.array_equal(np.asarray(out), a.T.max(axis=1, keepdims=True))
+
+
+def test_reduce_max_reads_an_expanded_input() -> None:
+    row = np.array([[1.0, 8.0, 4.0]], dtype=np.float32)
+
+    out = _core.zeros([4, 1])
+    _core.reduce_max(tensor(row).expand([4, 3]), out)
+
+    assert np.array_equal(np.asarray(out), np.full((4, 1), 8.0))
+
+
+def test_reduce_max_rejects_a_rank_change() -> None:
+    with pytest.raises(ValueError, match="rank mismatch"):
+        _core.reduce_max(_core.zeros([2, 3]), _core.zeros([2]))
+
+
+def test_reduce_max_rejects_an_extent_that_is_neither_matching_nor_one() -> None:
+    with pytest.raises(ValueError, match="incompatible shape"):
+        _core.reduce_max(_core.zeros([2, 3]), _core.zeros([2, 2]))
+
+
+def test_reduce_max_rejects_a_non_contiguous_output() -> None:
+    tr_out = _core.zeros([3, 2]).transpose(0, 1)
+
+    with pytest.raises(ValueError, match="output must be contiguous"):
+        _core.reduce_max(_core.zeros([2, 3]), tr_out)

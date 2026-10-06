@@ -2,6 +2,7 @@
 
 #include "gemm.hpp"
 #include "gemm_internal.hpp"
+#include "random.hpp"
 #include "tensor.hpp"
 #include "tensor_ops.hpp"
 
@@ -382,7 +383,28 @@ race. This is the same statement tensor.hpp already makes about the C++ side.
                  return t.clone();
              }, py::arg("memo"), "Deep: fresh storage, same values. Equivalent to clone().");
 
-    // Factories                                                             
+
+    // Generator
+
+
+    // Non-copyable, so pybind11 owns the one instance and Python gets a
+    // reference to it. py::init constructs in place.
+    py::class_<Generator>(m, "Generator", R"(Seeded source of pseudorandom floats.
+
+Holds its own engine, so two Generators built from the same seed produce the
+same numbers regardless of what else in the process is drawing.)")
+
+        .def(py::init<std::uint64_t>(), py::arg("seed"),
+             "Seed the stream. The same seed always gives the same sequence.")
+
+        // Already out-parameter style in C++, so no lambda to adapt it.
+        .def("uniform", &Generator::uniform,
+             py::arg("out"), py::arg("lo"), py::arg("hi"),
+             "Overwrite every element of out with a draw from [lo, hi).\n\n"
+             "Successive calls advance the stream, so two fills differ. out must\n"
+             "be contiguous and lo must be below hi, or ValueError.");
+
+    // Factories
 
     m.def("from_numpy", [](const NpArray &arr) -> Tensor {
               if (arr.ndim() < 1 || arr.ndim() > static_cast<py::ssize_t>(MAX_RANK)) {
@@ -447,6 +469,26 @@ race. This is the same statement tensor.hpp already makes about the C++ side.
               ::relu(a, out);
           }, py::arg("a"), py::arg("out"),
           "out = max(a, 0), elementwise. Same contract as add.");
+
+    m.def("exp", [](const Tensor &a, Tensor &out) -> void {
+              ::exp(a, out);
+          }, py::arg("a"), py::arg("out"),
+          "out = e**a, elementwise. Same contract as add.\n\n"
+          "Values are not checked: a large input overflows to inf.");
+
+    m.def("log", [](const Tensor &a, Tensor &out) -> void {
+              ::log(a, out);
+          }, py::arg("a"), py::arg("out"),
+          "out = ln(a), elementwise. Same contract as add.\n\n"
+          "Values are not checked: a negative input gives nan, zero gives -inf.");
+
+    m.def("reduce_max", [](const Tensor &a, Tensor &out) -> void {
+              ::reduce_max(a, out);
+          }, py::arg("a"), py::arg("out"),
+          "out = max of a over every dimension where out's extent is 1.\n\n"
+          "Shape rules are sum_into's: ranks match, each out extent is a's or 1,\n"
+          "out is contiguous. Unlike sum_into this OVERWRITES out - a max cannot\n"
+          "start from zeros, or an all-negative row would come back 0.");
 
     m.def("add_into", [](Tensor &dst, const Tensor &src) -> void {
               ::add_into(dst, src);

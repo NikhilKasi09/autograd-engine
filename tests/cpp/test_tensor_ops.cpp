@@ -547,3 +547,176 @@ TEST_CASE("an op may write into one of its own inputs", "[ops]") {
         REQUIRE(a.data()[i] == 7.0f);
     }
 }
+
+/* ------------------------------------------------------------------------ */
+/* exp, log and reduce_max - what phase 8's cross-entropy is built from      */
+/* ------------------------------------------------------------------------ */
+
+TEST_CASE("exp and log are elementwise and inverse to each other", "[ops]") {
+    Tensor a({2, 3});
+    a.data()[0] = 0.0f;  a.data()[1] = 1.0f;  a.data()[2] = -1.0f;
+    a.data()[3] = 2.0f;  a.data()[4] = -3.0f; a.data()[5] = 0.5f;
+
+    Tensor e({2, 3});
+    exp(a, e);
+    for (std::size_t i = 0; i < 6; i++) {
+        REQUIRE(e.data()[i] == std::exp(a.data()[i]));
+    }
+    REQUIRE(e.data()[0] == 1.0f);
+
+    Tensor back({2, 3});
+    log(e, back);
+    for (std::size_t i = 0; i < 6; i++) {
+        REQUIRE(std::fabs(back.data()[i] - a.data()[i]) < 1e-6f);
+    }
+}
+
+TEST_CASE("exp and log read strided inputs through their strides", "[ops]") {
+    Tensor t({2, 3});
+    fill_iota(t); // rows {0 1 2} and {3 4 5}
+
+    SECTION("exp of a transposed input") {
+        const Tensor tr = t.transpose(0, 1); // 3x2: {0 3} {1 4} {2 5}
+        Tensor out({3, 2});
+        exp(tr, out);
+
+        // A flat walk gives exp of 0 1 2 3 4 5 in that order instead.
+        const float want[6] = {0, 3, 1, 4, 2, 5};
+        for (std::size_t i = 0; i < 6; i++) {
+            REQUIRE(out.data()[i] == std::exp(want[i]));
+        }
+    }
+
+    SECTION("log of an expanded input") {
+        Tensor row({1, 3});
+        row.data()[0] = 1.0f; row.data()[1] = 2.0f; row.data()[2] = 4.0f;
+
+        const Tensor wide = row.expand({2, 3});
+        Tensor out({2, 3});
+        log(wide, out);
+
+        for (std::size_t i = 0; i < 6; i++) {
+            REQUIRE(out.data()[i] == std::log(row.data()[i % 3]));
+        }
+    }
+}
+
+TEST_CASE("exp and log reject bad shapes and a non-contiguous output", "[ops]") {
+    Tensor a({2, 3});
+    Tensor wrong({3, 2});
+    REQUIRE_THROWS_AS(exp(a, wrong), std::invalid_argument);
+    REQUIRE_THROWS_AS(log(a, wrong), std::invalid_argument);
+
+    Tensor base({3, 2});
+    Tensor tr = base.transpose(0, 1);
+    REQUIRE_THROWS_AS(exp(a, tr), std::invalid_argument);
+    REQUIRE_THROWS_AS(log(a, tr), std::invalid_argument);
+}
+
+TEST_CASE("reduce_max collapses dimensions whose output extent is 1", "[ops]") {
+    Tensor a({2, 3});
+    a.data()[0] = 1.0f; a.data()[1] = 7.0f; a.data()[2] = 3.0f;
+    a.data()[3] = 9.0f; a.data()[4] = 2.0f; a.data()[5] = 4.0f;
+
+    SECTION("across the columns - one max per row") {
+        Tensor out({2, 1});
+        reduce_max(a, out);
+        REQUIRE(out.data()[0] == 7.0f);
+        REQUIRE(out.data()[1] == 9.0f);
+    }
+
+    SECTION("down the rows - the other axis on the same input") {
+        Tensor out({1, 3});
+        reduce_max(a, out);
+        REQUIRE(out.data()[0] == 9.0f);
+        REQUIRE(out.data()[1] == 7.0f);
+        REQUIRE(out.data()[2] == 4.0f);
+    }
+
+    SECTION("to a single element") {
+        Tensor out({1, 1});
+        reduce_max(a, out);
+        REQUIRE(out.data()[0] == 9.0f);
+    }
+
+    SECTION("no collapse at all is a copy") {
+        Tensor out({2, 3});
+        reduce_max(a, out);
+        for (std::size_t i = 0; i < 6; i++) {
+            REQUIRE(out.data()[i] == a.data()[i]);
+        }
+    }
+}
+
+TEST_CASE("reduce_max of an all-negative row is negative", "[ops]") {
+    // The case a zero-seeded implementation fails and every other case passes.
+    Tensor a({2, 3});
+    a.data()[0] = -5.0f; a.data()[1] = -2.0f; a.data()[2] = -9.0f;
+    a.data()[3] = -1.0f; a.data()[4] = -4.0f; a.data()[5] = -3.0f;
+
+    Tensor out({2, 1});
+    reduce_max(a, out);
+
+    REQUIRE(out.data()[0] == -2.0f);
+    REQUIRE(out.data()[1] == -1.0f);
+}
+
+TEST_CASE("reduce_max overwrites its output", "[ops]") {
+    // The opposite contract to sum_into. A max against the old contents would
+    // keep the 100.
+    Tensor a({2, 3});
+    fill_iota(a);
+
+    Tensor out({2, 1});
+    fill_with(out, 100.0f);
+    reduce_max(a, out);
+
+    REQUIRE(out.data()[0] == 2.0f);
+    REQUIRE(out.data()[1] == 5.0f);
+}
+
+TEST_CASE("reduce_max reads a strided input through its strides", "[ops]") {
+    SECTION("a transposed input") {
+        Tensor t({2, 3});
+        fill_iota(t); // rows {0 1 2} and {3 4 5}
+
+        const Tensor tr = t.transpose(0, 1); // 3x2: {0 3} {1 4} {2 5}
+        Tensor out({3, 1});
+        reduce_max(tr, out);
+
+        // A flat walk pairs them {0 1} {2 3} {4 5} and returns 1, 3, 5.
+        REQUIRE(out.data()[0] == 3.0f);
+        REQUIRE(out.data()[1] == 4.0f);
+        REQUIRE(out.data()[2] == 5.0f);
+    }
+
+    SECTION("an expanded input") {
+        Tensor row({1, 3});
+        row.data()[0] = 1.0f; row.data()[1] = 8.0f; row.data()[2] = 4.0f;
+
+        const Tensor wide = row.expand({4, 3});
+        Tensor out({4, 1});
+        reduce_max(wide, out);
+
+        for (std::size_t i = 0; i < 4; i++) {
+            REQUIRE(out.data()[i] == 8.0f);
+        }
+    }
+}
+
+TEST_CASE("reduce_max rejects bad shapes and a non-contiguous output", "[ops]") {
+    Tensor a({2, 3});
+
+    Tensor rank1({6});
+    REQUIRE_THROWS_AS(reduce_max(a, rank1), std::invalid_argument);
+
+    Tensor neither({2, 2});
+    REQUIRE_THROWS_AS(reduce_max(a, neither), std::invalid_argument);
+
+    Tensor bigger({4, 3});
+    REQUIRE_THROWS_AS(reduce_max(a, bigger), std::invalid_argument);
+
+    Tensor base({3, 2});
+    Tensor tr = base.transpose(0, 1); // {2,3} but not contiguous
+    REQUIRE_THROWS_AS(reduce_max(a, tr), std::invalid_argument);
+}

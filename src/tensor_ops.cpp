@@ -1,6 +1,8 @@
 #include "tensor_ops.hpp"
 
 #include <array>
+#include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -152,6 +154,14 @@ void relu(const Tensor &a, Tensor &out) {
     unary_elementwise(a, out, "relu", [](float x) { return x > 0.0f ? x : 0.0f; });
 }
 
+void exp(const Tensor &a, Tensor &out) {
+    unary_elementwise(a, out, "exp", [](float x) { return std::exp(x); });
+}
+
+void log(const Tensor &a, Tensor &out) {
+    unary_elementwise(a, out, "log", [](float x) { return std::log(x); });
+}
+
 /* ------------------------------------------------------------------------ */
 /* Accumulate and reduce                                                     */
 /* ------------------------------------------------------------------------ */
@@ -221,6 +231,60 @@ void sum_into(Tensor &dst, const Tensor &src) {
                     std::size_t src_off = i0*ws.strides[0] + i1*ws.strides[1] + i2*ws.strides[2] + i3*ws.strides[3];
                     std::size_t dst_off = i0*wd.strides[0] + i1*wd.strides[1] + i2*wd.strides[2] + i3*wd.strides[3];
                     dst_ptr[dst_off] += src_ptr[src_off];
+                }
+            }
+        }
+    }
+}
+
+void reduce_max(const Tensor &a, Tensor &out) {
+    // Rank first - every shape(d) below asserts d < rank.
+    if (out.rank() != a.rank()) {
+        throw std::invalid_argument("reduce_max: rank mismatch");
+    }
+
+    // Same rule as sum_into: an extent matches, or is 1 and collapses.
+    for (std::size_t d = 0; d < out.rank(); ++d) {
+        std::size_t os = out.shape(d);
+        std::size_t as = a.shape(d);
+        if (os != as && os != 1) {
+            throw std::invalid_argument("reduce_max: incompatible shape");
+        }
+    }
+
+    require_contiguous_out(out, "reduce_max");
+
+    float *out_ptr = out.data();
+    const float *a_ptr = a.data();
+
+    // Seed with -inf, not zero. Every slot sees at least one element, so none
+    // of these survive.
+    const std::size_t n = out.numel();
+    for (std::size_t i = 0; i < n; i++) {
+        out_ptr[i] = -std::numeric_limits<float>::infinity();
+    }
+
+    Walk wa = padded(a);
+    Walk wo = padded(out);
+
+    // Stride 0 on each collapsed dimension, so every index along it lands on
+    // the same float. Same trick as sum_into.
+    for (std::size_t d = 0; d < MAX_RANK; d++) {
+        if (wo.shape[d] == 1) {
+            wo.strides[d] = 0;
+        }
+    }
+
+    for (std::size_t i0 = 0; i0 < wa.shape[0]; i0++) {
+        for (std::size_t i1 = 0; i1 < wa.shape[1]; i1++) {
+            for (std::size_t i2 = 0; i2 < wa.shape[2]; i2++) {
+                for (std::size_t i3 = 0; i3 < wa.shape[3]; i3++) {
+                    std::size_t a_off = i0*wa.strides[0] + i1*wa.strides[1] + i2*wa.strides[2] + i3*wa.strides[3];
+                    std::size_t out_off = i0*wo.strides[0] + i1*wo.strides[1] + i2*wo.strides[2] + i3*wo.strides[3];
+
+                    if (a_ptr[a_off] > out_ptr[out_off]) {
+                        out_ptr[out_off] = a_ptr[a_off];
+                    }
                 }
             }
         }

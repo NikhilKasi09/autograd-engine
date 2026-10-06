@@ -17,6 +17,7 @@ from autograd import _core
 # the point - it is the one place the shape of _core is written down.
 EXPECTED = [
     "Tensor",
+    "Generator",
     "MAX_RANK",
     "zeros",
     "zeros_like",
@@ -26,6 +27,9 @@ EXPECTED = [
     "scale",
     "relu",
     "relu_backward",
+    "exp",
+    "log",
+    "reduce_max",
     "add_into",
     "sum_into",
     "sum",

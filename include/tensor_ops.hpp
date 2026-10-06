@@ -54,6 +54,12 @@ void relu(const Tensor &a, Tensor &out);
 // keeps the forward and backward kernels agreeing at the boundary.
 void relu_backward(const Tensor &grad_out, const Tensor &ref, Tensor &out);
 
+// out = e^a. Values are not checked: a large input overflows to inf.
+void exp(const Tensor &a, Tensor &out);
+
+// out = ln(a). Values are not checked: a negative input gives NaN, zero -inf.
+void log(const Tensor &a, Tensor &out);
+
 // dst += src. The only op that reads its destination, and the reason it exists
 // is phase 6: a tensor used twice in the forward pass receives a gradient
 // contribution from each use, and they have to accumulate rather than the
@@ -75,6 +81,14 @@ void add_into(Tensor &dst, const Tensor &src);
 // {2,3} -> {1,3} is the bias gradient, {2,3} -> {1,1} is a full reduction into
 // a tensor, and both are the same call.
 void sum_into(Tensor &dst, const Tensor &src);
+
+// out = max of a over every dimension where out's extent is 1. Same shape
+// rules as sum_into: ranks match, each out extent is a's or 1, out contiguous.
+//
+// OVERWRITES, unlike sum_into. A max cannot start from a zeroed buffer - an
+// all-negative row would come back 0 - so this seeds out itself and the caller
+// zeroes nothing. Hence no _into suffix, and the output goes last.
+void reduce_max(const Tensor &a, Tensor &out);
 
 // Sum of every element, reading through a's strides - so summing an expand'd
 // view counts each repeat, which is correct and is what phase 6's broadcast
