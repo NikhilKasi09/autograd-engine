@@ -25,7 +25,7 @@ import pytest
 
 import autograd
 import gradcheck
-from autograd import _core
+from autograd import _core, nn
 
 torch = pytest.importorskip("torch")
 
@@ -136,6 +136,36 @@ def test_expand_matches_torch(base, target, rng) -> None:
     run_both([u(rng, *base)],
              lambda L: autograd.expand(L[0], target),
              lambda T: T[0].expand(target), target)
+
+
+def test_scale_matches_torch(rng) -> None:
+    run_both([u(rng, 2, 3)],
+             lambda L: autograd.scale(L[0], -2.5),
+             lambda T: T[0] * -2.5, (2, 3))
+
+
+# --------------------------------------------------------------------------
+# The nn layer
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("M", [2, 1], ids=["batch2", "batch1"])
+def test_linear_matches_torch(M: int, rng) -> None:
+    """Written out as x @ w + b rather than F.linear, which wants the weight
+    {out, in} and would hide the layout difference instead of checking it."""
+    run_both([u(rng, M, 3), u(rng, 3, 4), u(rng, 1, 4)],
+             lambda L: nn.linear(L[0], L[1], L[2]),
+             lambda T: T[0] @ T[1] + T[2].expand(M, 4), (M, 4))
+
+
+@pytest.mark.parametrize("reduction", ["mean", "sum"])
+def test_mse_loss_matches_torch(reduction: str, rng) -> None:
+    """reshape(1, 1) because the loss here keeps its rank, like sum."""
+    run_both([u(rng, 2, 3), u(rng, 2, 3)],
+             lambda L: nn.mse_loss(L[0], L[1], reduction=reduction),
+             lambda T: torch.nn.functional.mse_loss(
+                 T[0], T[1], reduction=reduction).reshape(1, 1),
+             (1, 1))
 
 
 # --------------------------------------------------------------------------

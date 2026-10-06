@@ -3,12 +3,12 @@
 Free functions rather than operators: every call site names the op that builds
 the node, which is what you want while reading a graph back.
 
-Six ops, and between them they cover every node shape the engine has to handle.
-Add saves nothing. Mul saves both operands. Matmul saves both and returns
-gradients shaped unlike the one it was handed. Relu saves its own output. Sum
-and Expand are duals - each returns a view on one side and allocates on the
-other - and they are the two that take configuration rather than a second
-tensor, which is what apply's keyword arguments exist for.
+Seven ops, and between them they cover every node shape the engine has to
+handle. Add saves nothing. Mul saves both operands. Matmul saves both and
+returns gradients shaped unlike the one it was handed. Relu saves its own
+output. Sum and Expand are duals - each returns a view on one side and allocates
+on the other - and with Scale they are the ones that take configuration rather
+than a second tensor, which is what apply's keyword arguments exist for.
 
 Every gemm the graph runs goes through _gemm_into, so the cost of a transposed
 operand is in one place rather than at four call sites.
@@ -220,6 +220,27 @@ class Expand(Function):
         return (into,)
 
 
+class Scale(Function):
+    """out = a * s, for a Python float s. Saves nothing but the float.
+
+    This is what lets a loss be written without new kernels: a - b is
+    add(a, scale(b, -1.0)), and a mean is scale(sum(x), 1 / n).
+    """
+
+    def __init__(self, s: float) -> None:
+        self.s = s
+
+    def forward(self, a: _core.Tensor) -> _core.Tensor:
+        out = _core.zeros_like(a)
+        _core.scale(a, self.s, out)
+        return out
+
+    def backward(self, grad_out: _core.Tensor) -> tuple[_core.Tensor | None, ...]:
+        into = _core.zeros_like(grad_out)
+        _core.scale(grad_out, self.s, into)
+        return (into,)
+
+
 def add(a: Tensor, b: Tensor) -> Tensor:
     """Elementwise sum. Shapes must match exactly; no implicit broadcasting."""
     return Add.apply(a, b)
@@ -260,3 +281,8 @@ def expand(a: Tensor, shape: tuple[int, ...]) -> Tensor:
     anywhere in this engine.
     """
     return Expand.apply(a, shape=shape)
+
+
+def scale(a: Tensor, s: float) -> Tensor:
+    """Multiply every element by the Python float s."""
+    return Scale.apply(a, s=s)

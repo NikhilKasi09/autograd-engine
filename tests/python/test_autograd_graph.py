@@ -16,7 +16,7 @@ import pytest
 
 import autograd
 from autograd import _core
-from autograd.ops import Add, Expand, Matmul, Mul, Relu, Sum
+from autograd.ops import Add, Expand, Matmul, Mul, Relu, Scale, Sum
 
 
 def leaf(a: np.ndarray, requires_grad: bool = False) -> autograd.Tensor:
@@ -383,3 +383,39 @@ def test_expand_rejects_stretching_a_dimension_larger_than_one() -> None:
 def test_expand_rejects_a_rank_change() -> None:
     with pytest.raises(ValueError, match="same rank"):
         autograd.expand(leaf(np.ones((1, 3))), (2, 1, 3))
+
+
+# --------------------------------------------------------------------------
+# scale - a Python float as configuration
+# --------------------------------------------------------------------------
+
+
+def test_scale_records_one_parent_and_the_factor_is_not_one_of_them() -> None:
+    x = leaf(np.ones((2, 3)), requires_grad=True)
+
+    out = autograd.scale(x, 3.0)
+
+    assert isinstance(out.grad_fn, Scale)
+    assert out.grad_fn.parents == (x,)
+
+
+def test_scale_forward_matches_numpy() -> None:
+    a = np.arange(6, dtype=np.float32).reshape(2, 3)
+
+    out = autograd.scale(leaf(a), -2.5)
+
+    assert np.array_equal(out.to_numpy(), a * np.float32(-2.5))
+
+
+def test_scale_saves_no_buffer() -> None:
+    """The gradient is grad_out * s, which needs the float and not the input."""
+    out = autograd.scale(leaf(np.ones((2, 3)), requires_grad=True), 2.0)
+
+    assert not getattr(out.grad_fn, "saved", ())
+
+
+def test_scale_builds_no_node_when_nothing_requires_grad() -> None:
+    out = autograd.scale(leaf(np.ones((2, 3))), 2.0)
+
+    assert out.grad_fn is None
+    assert not out.requires_grad

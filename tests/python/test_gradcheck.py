@@ -23,7 +23,7 @@ import pytest
 
 import autograd
 import gradcheck
-from autograd import _core
+from autograd import _core, nn
 
 
 def u(rng: np.random.Generator, *shape: int) -> np.ndarray:
@@ -122,6 +122,26 @@ CASES = [
                  lambda r: [u(r, 2, 1)], id="expand-col"),
     pytest.param(lambda L: autograd.expand(L[0], (3, 4)),
                  lambda r: [u(r, 1, 1)], id="expand-both"),
+    # A factor that is neither 1 nor -1, so a backward that forgot it shows.
+    pytest.param(lambda L: autograd.scale(L[0], -2.5),
+                 lambda r: [u(r, 2, 3)], id="scale"),
+    pytest.param(lambda L: autograd.scale(L[0], 0.25),
+                 lambda r: [u(r, 2, 3, 4)], id="scale-rank3"),
+    # x, weight and bias are all checked. Not square, so a weight stored
+    # {out, in} by mistake cannot pass.
+    pytest.param(lambda L: nn.linear(L[0], L[1], L[2]),
+                 lambda r: [u(r, 2, 3), u(r, 3, 4), u(r, 1, 4)], id="linear"),
+    pytest.param(lambda L: nn.linear(L[0], L[1], L[2]),
+                 lambda r: [u(r, 1, 5), u(r, 5, 3), u(r, 1, 3)], id="linear-batch1"),
+    pytest.param(lambda L: nn.linear(L[0], L[1]),
+                 lambda r: [u(r, 2, 3), u(r, 3, 4)], id="linear-no-bias"),
+    # Differentiable in the target too, so both operands are checked.
+    pytest.param(lambda L: nn.mse_loss(L[0], L[1]),
+                 lambda r: [u(r, 2, 3), u(r, 2, 3)], id="mse"),
+    pytest.param(lambda L: nn.mse_loss(L[0], L[1], reduction="sum"),
+                 lambda r: [u(r, 2, 3), u(r, 2, 3)], id="mse-sum"),
+    pytest.param(lambda L: nn.mse_loss(L[0], L[1]),
+                 lambda r: [u(r, 5), u(r, 5)], id="mse-rank1"),
 ]
 
 
