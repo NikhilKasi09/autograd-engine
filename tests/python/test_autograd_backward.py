@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 
 import autograd
+import autograd.engine
 from autograd import _core
 from autograd.ops import _gemm_into
 
@@ -141,6 +142,61 @@ def test_a_stored_gradient_matches_the_data_layout() -> None:
 
     assert x.grad.shape == x.data.shape
     assert x.grad.is_contiguous()
+
+
+class _ScaleByData(autograd.engine.Function):
+    """a * b where b is treated as data: backward returns None for it."""
+
+    def forward(self, a: _core.Tensor, b: _core.Tensor) -> _core.Tensor:
+        self.saved = (b,)
+        out = _core.zeros_like(a)
+        _core.mul(a, b, out)
+        return out
+
+    def backward(self, grad_out: _core.Tensor):
+        (b,) = self.saved
+        grad_a = _core.zeros_like(grad_out)
+        _core.mul(grad_out, b, grad_a)
+        return (grad_a, None)
+
+
+def test_an_input_an_op_declares_non_differentiable_gets_no_gradient() -> None:
+    """None from backward means "not differentiable", even for a parent that
+    asked. This used to be a KeyError: the walk reached the parent and found
+    nothing waiting for it."""
+    x = leaf(np.array([1.0, 2.0]))
+    data = leaf(np.array([3.0, 4.0]), requires_grad=True)
+
+    _ScaleByData.apply(x, data).backward(_core.from_numpy(np.ones(2, dtype=np.float32)))
+
+    assert np.array_equal(np.asarray(x.grad), [3.0, 4.0])
+    assert data.grad is None
+
+
+def test_nothing_upstream_of_a_non_differentiable_input_gets_a_gradient() -> None:
+    """The skip carries on up: `mid` got nothing, so it has nothing to hand
+    its own parents and must not call backward with a missing gradient."""
+    x = leaf(np.array([1.0, 2.0]))
+    y = leaf(np.array([5.0, 6.0]))
+    mid = autograd.add(y, y)
+    mid.retain_grad()
+
+    _ScaleByData.apply(x, mid).backward(_core.from_numpy(np.ones(2, dtype=np.float32)))
+
+    assert np.array_equal(np.asarray(x.grad), [10.0, 12.0])
+    assert mid.grad is None
+    assert y.grad is None
+
+
+def test_a_tensor_still_gets_the_gradient_from_its_differentiable_uses() -> None:
+    """Used once as data and once as a real operand: only the second counts."""
+    x = leaf(np.array([1.0, 2.0]))
+    y = leaf(np.array([5.0, 6.0]))
+
+    out = autograd.add(_ScaleByData.apply(x, y), y)
+    out.backward(_core.from_numpy(np.ones(2, dtype=np.float32)))
+
+    assert np.array_equal(np.asarray(y.grad), [1.0, 1.0])
 
 
 # --------------------------------------------------------------------------

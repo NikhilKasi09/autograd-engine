@@ -70,8 +70,8 @@ class Function:
 
         Total: return a gradient for every parent regardless of its
         requires_grad. The engine decides who receives one. None is reserved for
-        genuinely non-differentiable inputs, which phase 6 has and phase 5 does
-        not.
+        genuinely non-differentiable inputs, such as the target of a loss; the
+        walk then skips that parent and everything only reachable through it.
         """
         raise NotImplementedError
 
@@ -123,7 +123,11 @@ def backward(root: Tensor, gradient: _core.Tensor | None = None) -> None:
         _core.add_into(grads[tensor], contribution)
 
     for node in sorted_nodes:
-        grad = grads[node]
+        # Nothing reached this node: every path to it went through an input
+        # some op declared non-differentiable. Nothing to pass on either.
+        grad = grads.get(node)
+        if grad is None:
+            continue
 
         if not node.is_leaf: # The node is not a leaf, it was created by add or mul so needs to propogate back
             parents = node.grad_fn.backward(grad)
