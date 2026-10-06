@@ -18,7 +18,8 @@ class Function:
     refcount alone, with no cycle collector involved.
     """
 
-    # parents - the graph Tensors this node consumed, in argument order.
+    # parents    - the graph Tensors this node consumed, in argument order.
+    # needs_grad - one bool per parent: did it require grad when the op ran?
     # saved   - RAW _core.Tensors kept for backward. Never graph Tensors: saving
     #           a graph Tensor is the one move that would create a forward edge,
     #           and phase 6's relu will want to save its own output.
@@ -41,6 +42,9 @@ class Function:
 
         if any(t.requires_grad for t in inputs):
             node = cls(**params)
+            # Read once, here. backward uses it to skip work for a parent that
+            # wants no gradient, and the walk uses it to skip the parent.
+            node.needs_grad = tuple(t.requires_grad for t in inputs)
             raw_result = node.forward(*raw_inputs)
             result = Tensor(raw_result, requires_grad=True)
             result.grad_fn = node
@@ -68,10 +72,13 @@ class Function:
     def backward(self, grad_out: _core.Tensor) -> tuple[_core.Tensor | None, ...]:
         """Gradient of the output w.r.t. each parent, in parents order.
 
-        Total: return a gradient for every parent regardless of its
-        requires_grad. The engine decides who receives one. None is reserved for
-        genuinely non-differentiable inputs, such as the target of a loss; the
-        walk then skips that parent and everything only reachable through it.
+        Return None for a parent that gets no gradient: either it cannot have
+        one, like the target of a loss, or self.needs_grad says it does not
+        want one. The second is optional - returning a gradient nobody needs is
+        wasted work, never a wrong answer, so skip it where computing it costs
+        something. Matmul's is a whole GEMM; Add's is free.
+
+        The walk drops that parent and everything only reachable through it.
         """
         raise NotImplementedError
 
@@ -130,9 +137,11 @@ def backward(root: Tensor, gradient: _core.Tensor | None = None) -> None:
             continue
 
         if not node.is_leaf: # The node is not a leaf, it was created by add or mul so needs to propogate back
-            parents = node.grad_fn.backward(grad)
-            for parent, contribution in zip(node.grad_fn.parents, parents):
-                if contribution is not None:
+            fn = node.grad_fn
+            for parent, wanted, contribution in zip(fn.parents, fn.needs_grad, fn.backward(grad)):
+                # An op may hand back a gradient it got for free. Declining it
+                # here is what saves the buffer it would be collected into.
+                if wanted and contribution is not None:
                     accumulate(grads, parent, contribution)
 
         # Set the gradient on leafs that need it

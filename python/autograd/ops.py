@@ -47,10 +47,15 @@ class Mul(Function):
 
     def backward(self, grad_out: _core.Tensor) -> tuple[_core.Tensor | None, ...]:
         a, b = self.saved
-        grad_a = _core.zeros_like(grad_out)
-        _core.mul(grad_out, b, grad_a)
-        grad_b = _core.zeros_like(grad_out)
-        _core.mul(grad_out, a, grad_b)
+        need_a, need_b = self.needs_grad
+
+        grad_a = grad_b = None
+        if need_a:
+            grad_a = _core.zeros_like(grad_out)
+            _core.mul(grad_out, b, grad_a)
+        if need_b:
+            grad_b = _core.zeros_like(grad_out)
+            _core.mul(grad_out, a, grad_b)
         return (grad_a, grad_b)
 
 
@@ -109,6 +114,10 @@ class Matmul(Function):
     forward is {M,K} @ {K,N} -> {M,N}, so dA = dC @ b.T is {M,N} @ {N,K} and
     dB = a.T @ dC is {K,M} @ {M,N}. On a square case all four have the same
     shape and every wrong version still runs.
+
+    Each gradient is a GEMM of its own, so backward computes only the ones
+    needs_grad asks for. A layer's input is data and wants none - and at
+    {64,128} @ {128,784} that one is as big as the layer's forward pass.
     """
 
     def forward(self, a: _core.Tensor, b: _core.Tensor) -> _core.Tensor:
@@ -121,14 +130,17 @@ class Matmul(Function):
 
     def backward(self, grad_out: _core.Tensor) -> tuple[_core.Tensor | None, ...]:
         a, b = self.saved
+        need_a, need_b = self.needs_grad
         M, K = a.shape
         _, N = b.shape
 
-        da = _core.zeros([M, K])
-        _gemm_into(grad_out, b, da, tb=True)   # dA = grad_out @ b.T
-
-        db = _core.zeros([K, N])
-        _gemm_into(a, grad_out, db, ta=True)   # dB = a.T @ grad_out
+        da = db = None
+        if need_a:
+            da = _core.zeros([M, K])
+            _gemm_into(grad_out, b, da, tb=True)   # dA = grad_out @ b.T
+        if need_b:
+            db = _core.zeros([K, N])
+            _gemm_into(a, grad_out, db, ta=True)   # dB = a.T @ grad_out
 
         return (da, db)
 

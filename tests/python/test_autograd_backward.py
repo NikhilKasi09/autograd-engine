@@ -939,3 +939,103 @@ def test_dropping_an_expand_graph_frees_it_without_the_collector() -> None:
         assert alive == [], f"still reachable after dropping the root: {alive}"
     finally:
         gc.enable()
+
+
+# --------------------------------------------------------------------------
+# Work nobody asked for
+# --------------------------------------------------------------------------
+#
+# None of these are about values. A gradient computed for a parent that wants
+# none is discarded, so every value test passes whether it is computed or not.
+# What changes is the work done - on MNIST, a third of a training step.
+
+
+def count_gemms(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+    """Record the output shape of every GEMM the graph runs."""
+    seen: list[tuple] = []
+    real = autograd.ops._gemm_into
+
+    def counting(a, b, out, **kwargs):
+        seen.append(out.shape)
+        real(a, b, out, **kwargs)
+
+    monkeypatch.setattr(autograd.ops, "_gemm_into", counting)
+    return seen
+
+
+def test_a_node_records_which_parents_need_a_gradient() -> None:
+    x = leaf(np.ones((2, 3)), requires_grad=False)
+    w = leaf(np.ones((3, 4)))
+
+    assert autograd.matmul(x, w).grad_fn.needs_grad == (False, True)
+
+
+def test_matmul_skips_the_product_for_an_input_that_needs_no_gradient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A layer's input is data. Its gradient is a whole GEMM, plus a transposed
+    copy of the weight, computed and thrown away."""
+    rng = np.random.default_rng(0)
+    x_, w_ = rng.standard_normal((2, 3)), rng.standard_normal((3, 4))
+    x, w = leaf(x_, requires_grad=False), leaf(w_)
+    seen = count_gemms(monkeypatch)
+
+    autograd.sum(autograd.matmul(x, w)).backward()
+
+    # The forward {2,4} and the weight gradient {3,4}. No {2,3}.
+    assert seen == [(2, 4), (3, 4)]
+    assert np.allclose(np.asarray(w.grad), x_.T @ np.ones((2, 4)), atol=1e-6)
+
+
+def test_matmul_skips_the_other_product_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mirror image, so a version that only ever skips the first passes one
+    of these and fails the other."""
+    rng = np.random.default_rng(0)
+    a_, b_ = rng.standard_normal((2, 3)), rng.standard_normal((3, 4))
+    a, b = leaf(a_), leaf(b_, requires_grad=False)
+    seen = count_gemms(monkeypatch)
+
+    autograd.sum(autograd.matmul(a, b)).backward()
+
+    assert seen == [(2, 4), (2, 3)]
+    assert np.allclose(np.asarray(a.grad), np.ones((2, 4)) @ b_.T, atol=1e-6)
+
+
+def test_matmul_still_computes_both_when_both_are_wanted(monkeypatch: pytest.MonkeyPatch) -> None:
+    a, b = leaf(np.ones((2, 3))), leaf(np.ones((3, 4)))
+    seen = count_gemms(monkeypatch)
+
+    autograd.sum(autograd.matmul(a, b)).backward()
+
+    assert seen == [(2, 4), (2, 3), (3, 4)]
+
+
+def test_mul_returns_nothing_for_a_parent_that_needs_no_gradient() -> None:
+    a = leaf(np.array([[1.0, 2.0, 3.0]]))
+    b = leaf(np.array([[4.0, 5.0, 6.0]]), requires_grad=False)
+    out = autograd.mul(a, b)
+
+    grad_a, grad_b = out.grad_fn.backward(_core.from_numpy(np.ones((1, 3), dtype=np.float32)))
+
+    assert np.array_equal(np.asarray(grad_a), [[4.0, 5.0, 6.0]])
+    assert grad_b is None
+
+
+def test_the_walk_allocates_nothing_for_a_leaf_that_needs_no_gradient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Add hands the same gradient to both parents for free, so here it is the
+    walk that has to decline it. Each add_into is a buffer being filled: one
+    to collect x's gradient, one to store it on x, and none for y."""
+    x = leaf(np.array([1.0, 2.0]))
+    y = leaf(np.array([3.0, 4.0]), requires_grad=False)
+    out = autograd.add(x, y)
+
+    calls = []
+    real = _core.add_into
+    monkeypatch.setattr(_core, "add_into", lambda dst, src: (calls.append(1), real(dst, src))[1])
+
+    out.backward(_core.from_numpy(np.ones(2, dtype=np.float32)))
+
+    assert len(calls) == 2
+    assert y.grad is None
