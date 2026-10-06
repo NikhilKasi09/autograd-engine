@@ -168,6 +168,33 @@ def test_mse_loss_matches_torch(reduction: str, rng) -> None:
              (1, 1))
 
 
+@pytest.mark.parametrize("reduction", ["mean", "sum"])
+@pytest.mark.parametrize("M, C", [(3, 4), (1, 5)], ids=["3x4", "batch1"])
+def test_cross_entropy_matches_torch(M: int, C: int, reduction: str, rng) -> None:
+    """Against log_softmax written out, with the same one-hot target. Only the
+    logits are compared: the target gets no gradient here by design, and torch
+    would happily give it one."""
+    logits = u(rng, M, C)
+    target = np.zeros((M, C), dtype=np.float32)
+    target[np.arange(M), rng.integers(0, C, M)] = 1.0
+    v = np.array([[0.7]], dtype=np.float32)     # not 1, so grad_out matters
+
+    leaves = gradcheck.make_leaves([logits, target])
+    loss = nn.cross_entropy(leaves[0], leaves[1], reduction=reduction)
+    loss.backward(_core.from_numpy(v))
+
+    tl = torch.tensor(logits.astype(np.float64), requires_grad=True)
+    tt = torch.tensor(target.astype(np.float64))
+    ref = -(torch.log_softmax(tl, dim=1) * tt).sum()
+    if reduction == "mean":
+        ref = ref / M
+    ref.reshape(1, 1).backward(torch.tensor(v.astype(np.float64)))
+
+    assert loss.to_numpy()[0, 0] == pytest.approx(ref.item(), rel=1e-6)
+    compare(leaves[:1], [tl])
+    assert leaves[1].grad is None
+
+
 # --------------------------------------------------------------------------
 # The whole thing
 # --------------------------------------------------------------------------

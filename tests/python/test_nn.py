@@ -374,3 +374,171 @@ def test_mse_loss_adds_no_node_type_of_its_own() -> None:
     out = nn.mse_loss(leaf(np.ones((2, 3)), requires_grad=True), leaf(np.zeros((2, 3))))
 
     assert type(out.grad_fn).__name__ == "Scale"
+
+
+# --------------------------------------------------------------------------
+# cross_entropy
+# --------------------------------------------------------------------------
+
+
+def one_hot(classes: list[int], C: int) -> np.ndarray:
+    t = np.zeros((len(classes), C), dtype=np.float32)
+    t[np.arange(len(classes)), classes] = 1.0
+    return t
+
+
+def reference_cross_entropy(logits: np.ndarray, target: np.ndarray) -> float:
+    """Mean over the batch, in float64, shifted so it cannot overflow either -
+    filterwarnings = error would fail this file on a NumPy overflow."""
+    z = logits.astype(np.float64)
+    z = z - z.max(axis=1, keepdims=True)
+    logp = z - np.log(np.exp(z).sum(axis=1, keepdims=True))
+    return float(-(logp * target).sum() / len(logits))
+
+
+@pytest.mark.parametrize("M, C", [(3, 4), (1, 5), (6, 2)], ids=["3x4", "batch1", "6x2"])
+def test_cross_entropy_matches_the_reference(M: int, C: int, rng) -> None:
+    logits = rng.uniform(-2, 2, (M, C)).astype(np.float32)
+    target = one_hot(list(rng.integers(0, C, M)), C)
+
+    out = nn.cross_entropy(leaf(logits), leaf(target))
+
+    assert out.shape == (1, 1)
+    assert out.to_numpy()[0, 0] == pytest.approx(
+        reference_cross_entropy(logits, target), rel=1e-5)
+
+
+def test_cross_entropy_of_equal_logits_is_log_of_the_class_count() -> None:
+    """Nothing to choose between the classes, so every probability is 1/C."""
+    out = nn.cross_entropy(leaf(np.zeros((2, 5))), leaf(one_hot([0, 3], 5)))
+
+    assert out.to_numpy()[0, 0] == pytest.approx(math.log(5.0), rel=1e-6)
+
+
+def test_cross_entropy_survives_logits_that_would_overflow_exp() -> None:
+    """exp(1000) is inf in float32. Without the shift by each row's max the
+    loss is nan; with it this is exact.
+
+    Row 0 picks its own largest logit, so it costs nothing. Row 1 picks the
+    class 50 below its largest, so it costs 50. Mean 25.
+    """
+    logits = leaf(np.array([[1000.0, 0.0, -1000.0],
+                            [-800.0, -900.0, -850.0]]), requires_grad=True)
+
+    out = nn.cross_entropy(logits, leaf(one_hot([0, 2], 3)))
+    out.backward()
+
+    assert out.to_numpy()[0, 0] == pytest.approx(25.0)
+    assert np.isfinite(np.asarray(logits.grad)).all()
+
+
+def test_cross_entropy_with_sum_reduction_is_the_batch_times_the_mean(rng) -> None:
+    logits = rng.uniform(-1, 1, (4, 3)).astype(np.float32)
+    target = one_hot([0, 1, 2, 1], 3)
+
+    mean = nn.cross_entropy(leaf(logits), leaf(target)).to_numpy()[0, 0]
+    total = nn.cross_entropy(leaf(logits), leaf(target), reduction="sum").to_numpy()[0, 0]
+
+    assert total == pytest.approx(4.0 * mean, rel=1e-6)
+
+
+def test_cross_entropy_gradient_is_softmax_minus_target_over_the_batch(rng) -> None:
+    logits = rng.uniform(-1, 1, (3, 4)).astype(np.float32)
+    target = one_hot([1, 3, 0], 4)
+    x = leaf(logits, requires_grad=True)
+
+    nn.cross_entropy(x, leaf(target)).backward()
+
+    z = logits.astype(np.float64)
+    e = np.exp(z - z.max(axis=1, keepdims=True))
+    softmax = e / e.sum(axis=1, keepdims=True)
+    assert np.allclose(np.asarray(x.grad), (softmax - target) / 3.0, rtol=1e-5, atol=1e-6)
+
+
+def test_cross_entropy_gradient_follows_whatever_is_above_the_loss(rng) -> None:
+    """Scale the loss by k and the gradient must scale by k.
+
+    When the loss is the root, grad_out is 1 and a backward that ignored it
+    gives the right answer. Anything stacked on the loss - a weighting, a
+    second loss added to it - is where that shows.
+    """
+    logits = rng.uniform(-1, 1, (3, 4)).astype(np.float32)
+    target = one_hot([1, 3, 0], 4)
+
+    plain = leaf(logits, requires_grad=True)
+    nn.cross_entropy(plain, leaf(target)).backward()
+
+    scaled = leaf(logits, requires_grad=True)
+    autograd.scale(nn.cross_entropy(scaled, leaf(target)), 3.0).backward()
+
+    assert np.allclose(np.asarray(scaled.grad), 3.0 * np.asarray(plain.grad),
+                       rtol=1e-6, atol=1e-7)
+
+
+def test_the_target_never_receives_a_gradient_even_if_it_asks() -> None:
+    """The first op in the engine to return None from backward."""
+    logits = leaf(np.zeros((2, 3)), requires_grad=True)
+    target = leaf(one_hot([0, 2], 3), requires_grad=True)
+
+    out = nn.cross_entropy(logits, target)
+    grads = out.grad_fn.backward(_core.from_numpy(np.ones((1, 1), dtype=np.float32)))
+    out.backward()
+
+    assert out.grad_fn.parents == (logits, target)
+    assert grads[0].shape == (2, 3)
+    assert grads[1] is None
+    assert logits.grad is not None
+    assert target.grad is None
+
+
+def test_cross_entropy_saves_raw_buffers_and_never_graph_tensors() -> None:
+    out = nn.cross_entropy(leaf(np.zeros((2, 3)), requires_grad=True),
+                           leaf(one_hot([0, 2], 3)))
+
+    saved = out.grad_fn.saved
+    assert len(saved) == 2
+    for item in saved:
+        assert isinstance(item, _core.Tensor)
+        assert not isinstance(item, autograd.Tensor)
+
+
+def test_cross_entropy_saves_the_softmax_probabilities() -> None:
+    out = nn.cross_entropy(leaf(np.zeros((2, 4)), requires_grad=True),
+                           leaf(one_hot([0, 2], 4)))
+
+    assert np.allclose(np.asarray(out.grad_fn.saved[0]), np.full((2, 4), 0.25))
+
+
+def test_cross_entropy_does_not_modify_its_inputs(rng) -> None:
+    """forward reuses its own scratch buffers; the caller's must come back
+    untouched."""
+    logits = rng.uniform(-1, 1, (3, 4)).astype(np.float32)
+    target = one_hot([1, 3, 0], 4)
+    x, t = leaf(logits, requires_grad=True), leaf(target)
+
+    nn.cross_entropy(x, t).backward()
+
+    assert np.array_equal(x.to_numpy(), logits)
+    assert np.array_equal(t.to_numpy(), target)
+
+
+def test_cross_entropy_builds_no_node_when_nothing_requires_grad() -> None:
+    out = nn.cross_entropy(leaf(np.zeros((2, 3))), leaf(one_hot([0, 2], 3)))
+
+    assert out.grad_fn is None
+
+
+def test_cross_entropy_rejects_an_unknown_reduction() -> None:
+    with pytest.raises(ValueError, match="reduction must be"):
+        nn.cross_entropy(leaf(np.zeros((2, 3))), leaf(one_hot([0, 2], 3)), reduction="none")
+
+
+def test_cross_entropy_rejects_logits_that_are_not_rank_2() -> None:
+    with pytest.raises(ValueError, match="rank 2"):
+        nn.cross_entropy(leaf(np.zeros(3)), leaf(np.zeros(3)))
+
+
+def test_cross_entropy_rejects_a_target_of_another_shape() -> None:
+    """Class indices instead of one-hot rows is the likely mistake."""
+    with pytest.raises(ValueError):
+        nn.cross_entropy(leaf(np.zeros((2, 3))), leaf(np.zeros((2, 1))))

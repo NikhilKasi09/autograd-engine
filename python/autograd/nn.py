@@ -12,6 +12,7 @@ import math
 from typing import Iterator
 
 from . import _core
+from .engine import Function
 from .ops import add, expand, matmul, mul, reduce_sum, scale
 from .tensor import Tensor
 
@@ -138,3 +139,88 @@ def mse_loss(pred: Tensor, target: Tensor, *, reduction: str = "mean") -> Tensor
     if reduction == "sum":
         return total
     return scale(total, 1.0 / math.prod(pred.shape))
+
+
+class SoftmaxCrossEntropy(Function):
+    """Softmax and cross-entropy as one node: logits {M,C}, targets {M,C}.
+
+    One node rather than exp, log and divide ops chained together, because the
+    chained version overflows on large logits and this one cannot. It also
+    makes the gradient (softmax - target), with no exp or log to differentiate.
+
+    Each target row must sum to 1 - one-hot, or soft labels. Saves the softmax
+    probabilities and the target.
+    """
+
+    def __init__(self, reduction: str = "mean") -> None:
+        self.reduction = reduction
+
+    def forward(self, logits: _core.Tensor, target: _core.Tensor) -> _core.Tensor:
+        if len(logits.shape) != 2:
+            raise ValueError("cross_entropy: logits must be rank 2, {batch, classes}")
+        M, C = logits.shape
+
+        # Mean over the batch, or not. Backward needs the same factor.
+        self.factor = 1.0 / M if self.reduction == "mean" else 1.0
+
+        # Shift each row so its largest logit is 0. Softmax does not change,
+        # and now every exp below is of something <= 0 and cannot overflow.
+        shift = _core.zeros([M, 1])
+        _core.reduce_max(logits, shift)
+        _core.scale(shift, -1.0, shift)
+        z = _core.zeros([M, C])
+        _core.add(logits, shift.expand([M, C]), z)
+
+        # log of each row's sum of exps. The row's max contributes exp(0) = 1,
+        # so the sum is at least 1 and the log is safe.
+        e = _core.zeros([M, C])
+        _core.exp(z, e)
+        log_sum = _core.zeros([M, 1])
+        _core.sum_into(log_sum, e)
+        _core.log(log_sum, log_sum)
+
+        # log-softmax = z - log_sum
+        _core.scale(log_sum, -1.0, log_sum)
+        logp = _core.zeros([M, C])
+        _core.add(z, log_sum.expand([M, C]), logp)
+
+        # Softmax itself, for backward. Reuses e, which is finished with.
+        _core.exp(logp, e)
+        self.saved = (e, target)
+
+        # loss = -sum(target * logp), over the batch. Reuses z the same way.
+        _core.mul(logp, target, z)
+        out = _core.zeros([1, 1])
+        _core.sum_into(out, z)
+        _core.scale(out, -self.factor, out)
+        return out
+
+    def backward(self, grad_out: _core.Tensor) -> tuple[_core.Tensor | None, ...]:
+        p, target = self.saved
+
+        # softmax - target
+        d = _core.zeros_like(p)
+        _core.scale(target, -1.0, d)
+        _core.add(p, d, d)
+
+        # Times grad_out. It is 1 when the loss is the root, which is the only
+        # case where leaving this out would go unnoticed.
+        _core.mul(d, grad_out.expand(list(p.shape)), d)
+        _core.scale(d, self.factor, d)
+
+        # The target is data, not something to differentiate.
+        return (d, None)
+
+
+def cross_entropy(logits: Tensor, target: Tensor, *, reduction: str = "mean") -> Tensor:
+    """Softmax cross-entropy of logits {M,C} against targets {M,C}, as {1,1}.
+
+    Takes raw logits, not probabilities - the softmax is inside. Targets are
+    one row per sample summing to 1, usually one-hot; there are no class
+    indices because there is no integer tensor.
+
+    Averaged over the batch; reduction="sum" skips the average. The target
+    receives no gradient.
+    """
+    _check_reduction(reduction)
+    return SoftmaxCrossEntropy.apply(logits, target, reduction=reduction)

@@ -247,6 +247,65 @@ def test_backward_returns_one_correctly_shaped_gradient_per_parent(build, make, 
 
 
 # --------------------------------------------------------------------------
+# Cross-entropy
+# --------------------------------------------------------------------------
+#
+# Kept out of CASES. Its second operand is the target, which is data: backward
+# returns None for it, so there is no gradient there to compare. Everything
+# below checks operand 0 only and the None is pinned in test_nn.py.
+#
+# Logits stay in (-1, 1). h = 3e-3 was swept for this before the cases were
+# written: worst error 0.54x the tolerance over 120 cases at this scale. At
+# three times the scale one case in 120 goes over, so do not widen the inputs.
+
+
+def one_hot(rng: np.random.Generator, M: int, C: int) -> np.ndarray:
+    t = np.zeros((M, C), dtype=np.float32)
+    t[np.arange(M), rng.integers(0, C, M)] = 1.0
+    return t
+
+
+CE_SHAPES = [pytest.param(3, 4, id="3x4"), pytest.param(2, 3, id="2x3"),
+             pytest.param(1, 5, id="batch1")]
+
+
+@pytest.mark.parametrize("M, C", CE_SHAPES)
+@pytest.mark.parametrize("reduction", ["mean", "sum"])
+def test_the_cross_entropy_jacobian_matches_finite_differences(M, C, reduction, rng) -> None:
+    gradcheck.check_jacobian(
+        lambda L: nn.cross_entropy(L[0], L[1], reduction=reduction),
+        [u(rng, M, C), one_hot(rng, M, C)], wrt=0)
+
+
+@pytest.mark.parametrize("M, C", CE_SHAPES)
+def test_cross_entropy_matches_when_seeded_with_something_other_than_one(M, C, rng) -> None:
+    """The Jacobian check above seeds a {1,1} output with exactly 1.0, so a
+    backward that ignored grad_out would pass it. This one seeds a random v."""
+    gradcheck.check_directional(
+        lambda L: nn.cross_entropy(L[0], L[1]),
+        [u(rng, M, C), one_hot(rng, M, C)], wrt=0)
+
+
+def test_cross_entropy_matches_with_soft_targets(rng) -> None:
+    """Rows that sum to 1 without being one-hot."""
+    t = rng.uniform(0.1, 1.0, (3, 4))
+    t = (t / t.sum(axis=1, keepdims=True)).astype(np.float32)
+
+    gradcheck.check_jacobian(lambda L: nn.cross_entropy(L[0], L[1]),
+                             [u(rng, 3, 4), t], wrt=0)
+
+
+def test_a_linear_layer_under_cross_entropy_matches(rng) -> None:
+    """The last layer of a classifier and its loss, every parameter checked."""
+    t = one_hot(rng, 2, 4)
+
+    def build(L):
+        return nn.cross_entropy(nn.linear(L[0], L[1], L[2]), autograd.Tensor(_core.from_numpy(t)))
+
+    gradcheck.check_jacobian(build, [u(rng, 2, 3), u(rng, 3, 4), u(rng, 1, 4)])
+
+
+# --------------------------------------------------------------------------
 # Composites
 # --------------------------------------------------------------------------
 
