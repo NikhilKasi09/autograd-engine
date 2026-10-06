@@ -62,6 +62,28 @@ def test_a_run_is_reproducible_from_its_seed(data: mnist_data.Dataset) -> None:
     assert first.accuracy == second.accuracy
 
 
+def test_the_loss_follows_pytorch_step_for_step(data: mnist_data.Dataset) -> None:
+    """The only oracle for the whole loop on real data: same starting weights,
+    same batches, and the per-step loss has to match.
+
+    Measured before being asserted: over five seeds the two stay within 5.6e-7
+    relative for 300 steps, which is float32 rounding. They part company after
+    about an epoch, as any two float32 implementations must, so this stops at
+    300 rather than pretending they never do.
+    """
+    pytest.importorskip("torch")
+    import mnist_torch
+
+    small = first_steps(data, 300)
+
+    ours = mnist_train.run(small, seed=0, epochs=1)
+    theirs = mnist_torch.run(small, seed=0, epochs=1, threads=1)
+
+    assert len(ours.losses) == 300
+    assert ours.losses == pytest.approx(theirs.losses, rel=5e-6)
+    assert ours.accuracy[0] == pytest.approx(theirs.accuracy[0], abs=0.002)
+
+
 def test_a_different_seed_is_a_different_run(data: mnist_data.Dataset) -> None:
     """Otherwise the test above would pass with the seed ignored."""
     small = first_steps(data, 20)
