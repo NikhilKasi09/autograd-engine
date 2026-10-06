@@ -8,6 +8,9 @@ gemm_tests
 build/
 build-*/
 
+# Datasets fetched by examples/mnist_data.py
+data/
+
 # Python
 .venv/
 __pycache__/

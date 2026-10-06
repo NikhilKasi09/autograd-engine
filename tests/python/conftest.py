@@ -66,6 +66,18 @@ except ImportError as exc:
     TORCH_VERSION = None
 
 
+# The MNIST scripts live in examples/, outside the package, and their tests
+# import them by name. Appended for the same reason as the fallback above.
+_EXAMPLES = Path(__file__).resolve().parents[2] / "examples"
+if str(_EXAMPLES) not in sys.path:
+    sys.path.append(str(_EXAMPLES))
+
+import mnist_data  # noqa: E402 - needs the path entry above
+
+# The real-data tests skip without the files, and the header says so.
+MNIST_PRESENT = mnist_data.is_present()
+
+
 def pytest_report_header(config: pytest.Config) -> str:
     """Name the tree the module came from, and whether torch is here, every run.
 
@@ -73,7 +85,11 @@ def pytest_report_header(config: pytest.Config) -> str:
     silently skipped cross-check looks exactly like a passing one.
     """
     torch_line = TORCH_VERSION or "not installed, cross-check will skip"
-    return f"autograd._core: {_core.__file__}\ntorch: {torch_line}"
+    mnist_line = (
+        str(mnist_data.DATA_DIR) if MNIST_PRESENT
+        else "not downloaded, the MNIST tests will skip (python examples/mnist_data.py)"
+    )
+    return f"autograd._core: {_core.__file__}\ntorch: {torch_line}\nmnist: {mnist_line}"
 
 
 @pytest.fixture
