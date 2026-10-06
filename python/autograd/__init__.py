@@ -14,9 +14,9 @@ holds a complete, importable package. Which tree ends up on sys.path is decided
 by the environment, never by pytest config - see the note in pyproject.toml.
 """
 
-from . import _core, nn
+from . import _core, nn, optim
 from .ops import add, expand, matmul, mul, relu, scale
 from .ops import reduce_sum as sum
 from .tensor import Tensor
 
-__all__ = ["_core", "nn", "Tensor", "add", "expand", "matmul", "mul", "relu", "scale", "sum"]
+__all__ = ["_core", "nn", "optim", "Tensor", "add", "expand", "matmul", "mul", "relu", "scale", "sum"]

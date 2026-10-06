@@ -241,3 +241,49 @@ def test_a_strided_leaf_matches_torch(rng) -> None:
     got = np.asarray(leaves[0].grad).astype(np.float64)
     assert np.allclose(got.T, tleaves[0].grad.numpy(), rtol=RTOL, atol=ATOL)
     compare(leaves[1:], tleaves[1:])
+
+
+# --------------------------------------------------------------------------
+# Training
+# --------------------------------------------------------------------------
+
+
+def test_five_sgd_steps_on_an_mlp_match_torch(rng) -> None:
+    """The only oracle for the optimiser, and for everything at once: the same
+    weights, the same batch, five steps each, parameters compared at the end.
+
+    Weights are {in, out} on both sides, so torch runs x @ w rather than
+    nn.Linear, which would want them transposed.
+    """
+    from autograd import optim
+
+    M, n_in, n_hidden, n_out, lr = 6, 3, 5, 4, 0.3
+    x = u(rng, M, n_in)
+    target = np.zeros((M, n_out), dtype=np.float32)
+    target[np.arange(M), rng.integers(0, n_out, M)] = 1.0
+    init = [u(rng, n_in, n_hidden), u(rng, 1, n_hidden),
+            u(rng, n_hidden, n_out), u(rng, 1, n_out)]
+
+    params = [nn.Parameter(_core.from_numpy(a)) for a in init]
+    opt = optim.SGD(params, lr=lr)
+    xt, tt = gradcheck.make_leaves([x, target], requires_grad=False)
+    for _ in range(5):
+        opt.zero_grad()
+        hidden = autograd.relu(nn.linear(xt, params[0], params[1]))
+        nn.cross_entropy(nn.linear(hidden, params[2], params[3]), tt).backward()
+        opt.step()
+
+    tparams = as_torch(init)
+    topt = torch.optim.SGD(tparams, lr=lr)
+    tx = torch.tensor(x.astype(np.float64))
+    ttarget = torch.tensor(target.astype(np.float64))
+    for _ in range(5):
+        topt.zero_grad()
+        hidden = torch.relu(tx @ tparams[0] + tparams[1])
+        logits = hidden @ tparams[2] + tparams[3]
+        (-(torch.log_softmax(logits, dim=1) * ttarget).sum() / M).backward()
+        topt.step()
+
+    for i, (mine, theirs) in enumerate(zip(params, tparams)):
+        assert np.allclose(mine.to_numpy(), theirs.detach().numpy(), rtol=1e-5, atol=1e-6), (
+            f"parameter {i} drifted from torch after five steps")
