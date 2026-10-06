@@ -11,12 +11,13 @@ namespace {
 
 // A tensor's shape and strides padded out to MAX_RANK for walking.
 //
-// Dimensions at or above rank get extent 1 and stride 0, so the four nested
-// loops below run unconditionally: a rank-2 tensor trips the two outer loops
-// exactly once each and contributes nothing to the offset. That is the
-// alternative to decomposing a linear index into a multi-index per element,
-// which costs a divide per dimension per element - clone() does it that way
-// because it runs once, and these run every training step.
+// The padding goes on the LEFT: a rank-2 tensor fills slots 2 and 3, and slots
+// 0 and 1 get extent 1 and stride 0. So the four nested loops below run
+// unconditionally, the two outer ones trip once each, and the tensor's last
+// dimension is always the innermost loop - the one worth making fast.
+//
+// Padding on the right gives the same answers and put a rank-2 tensor's
+// columns in loop 1, leaving the innermost loop a single trip per element.
 struct Walk {
     std::array<std::size_t, MAX_RANK> shape;
     std::array<std::size_t, MAX_RANK> strides;
@@ -28,12 +29,20 @@ Walk padded(const Tensor &t) {
     w.shape.fill(1);
     w.strides.fill(0);
 
+    // Dimension d lands in slot d + pad, so the last one lands in slot 3.
+    const std::size_t pad = MAX_RANK - t.rank();
     for (std::size_t d = 0; d < t.rank(); ++d) {
-        w.shape[d] = t.shape(d);
-        w.strides[d] = t.stride(d);
+        w.shape[d + pad] = t.shape(d);
+        w.strides[d + pad] = t.stride(d);
     }
 
     return w;
+}
+
+// Offset of the first element of the row at (i0, i1, i2). A row is one run
+// along the last dimension; its elements are strides[3] apart from here.
+inline std::size_t row_start(const Walk &w, std::size_t i0, std::size_t i1, std::size_t i2) {
+    return i0*w.strides[0] + i1*w.strides[1] + i2*w.strides[2];
 }
 
 // Throws unless a and b have identical rank and extents. `who` names the
@@ -77,21 +86,36 @@ void binary_elementwise(const Tensor &a, const Tensor &b, Tensor &out,
     Walk wb = padded(b);
     Walk wo = padded(out);
 
-    float *out_ptr = out.data();
     const float *a_ptr = a.data();
     const float *b_ptr = b.data();
 
-    std::size_t lin = 0;
+    // out is contiguous, so its rows follow one another: this just advances.
+    float *out_row = out.data();
+
+    const std::size_t n = wo.shape[3];      // elements in one row
+    const std::size_t sa = wa.strides[3];   // step along a row, per input
+    const std::size_t sb = wb.strides[3];
+
     for (std::size_t i0 = 0; i0 < wo.shape[0]; i0++) {
         for (std::size_t i1 = 0; i1 < wo.shape[1]; i1++) {
             for (std::size_t i2 = 0; i2 < wo.shape[2]; i2++) {
-                for (std::size_t i3 = 0; i3 < wo.shape[3]; i3++) {
-                    std::size_t a_off = i0*wa.strides[0] + i1*wa.strides[1] + i2*wa.strides[2] + i3*wa.strides[3];
-                    std::size_t b_off = i0*wb.strides[0] + i1*wb.strides[1] + i2*wb.strides[2] + i3*wb.strides[3];
+                const float *a_row = a_ptr + row_start(wa, i0, i1, i2);
+                const float *b_row = b_ptr + row_start(wb, i0, i1, i2);
 
-                    out_ptr[lin] = op(a_ptr[a_off], b_ptr[b_off]);
-                    lin++;
+                if (sa == 1 && sb == 1) {
+                    // Both rows are contiguous runs. With no stride in the
+                    // index the compiler can vectorise this one.
+                    for (std::size_t j = 0; j < n; j++) {
+                        out_row[j] = op(a_row[j], b_row[j]);
+                    }
+                } else {
+                    // A transposed input, or stride 0 from an expand.
+                    for (std::size_t j = 0; j < n; j++) {
+                        out_row[j] = op(a_row[j*sa], b_row[j*sb]);
+                    }
                 }
+
+                out_row += n;
             }
         }
     }
@@ -127,19 +151,29 @@ namespace{
         Walk wa = padded(a);
         Walk wo = padded(out);
 
-        float *out_ptr = out.data();
         const float *a_ptr = a.data();
+        float *out_row = out.data();            // contiguous: rows are adjacent
 
-        std::size_t lin = 0;
+        const std::size_t n = wo.shape[3];      // elements in one row
+        const std::size_t sa = wa.strides[3];   // step along a row of a
+
         for (std::size_t i0 = 0; i0 < wo.shape[0]; i0++) {
             for (std::size_t i1 = 0; i1 < wo.shape[1]; i1++) {
                 for (std::size_t i2 = 0; i2 < wo.shape[2]; i2++) {
-                    for (std::size_t i3 = 0; i3 < wo.shape[3]; i3++) {
-                        std::size_t a_off = i0*wa.strides[0] + i1*wa.strides[1] + i2*wa.strides[2] + i3*wa.strides[3];
+                    const float *a_row = a_ptr + row_start(wa, i0, i1, i2);
 
-                        out_ptr[lin] = op(a_ptr[a_off]);
-                        lin++;
+                    if (sa == 1) {
+                        // A contiguous run: the vectorisable case.
+                        for (std::size_t j = 0; j < n; j++) {
+                            out_row[j] = op(a_row[j]);
+                        }
+                    } else {
+                        for (std::size_t j = 0; j < n; j++) {
+                            out_row[j] = op(a_row[j*sa]);
+                        }
                     }
+
+                    out_row += n;
                 }
             }
         }
@@ -172,19 +206,29 @@ void add_into(Tensor &dst, const Tensor &src) {
 
     Walk ws = padded(src);
 
-    float *dst_ptr = dst.data();
     const float *src_ptr = src.data();
+    float *dst_row = dst.data();            // contiguous: rows are adjacent
 
-    std::size_t lin = 0;
+    const std::size_t n = ws.shape[3];      // elements in one row
+    const std::size_t ss = ws.strides[3];   // step along a row of src
+
     for (std::size_t i0 = 0; i0 < ws.shape[0]; i0++) {
         for (std::size_t i1 = 0; i1 < ws.shape[1]; i1++) {
             for (std::size_t i2 = 0; i2 < ws.shape[2]; i2++) {
-                for (std::size_t i3 = 0; i3 < ws.shape[3]; i3++) {
-                    std::size_t src_off = i0*ws.strides[0] + i1*ws.strides[1] + i2*ws.strides[2] + i3*ws.strides[3];
+                const float *src_row = src_ptr + row_start(ws, i0, i1, i2);
 
-                    dst_ptr[lin] += src_ptr[src_off];
-                    lin++;
+                if (ss == 1) {
+                    // A contiguous run: the vectorisable case.
+                    for (std::size_t j = 0; j < n; j++) {
+                        dst_row[j] += src_row[j];
+                    }
+                } else {
+                    for (std::size_t j = 0; j < n; j++) {
+                        dst_row[j] += src_row[j*ss];
+                    }
                 }
+
+                dst_row += n;
             }
         }
     }

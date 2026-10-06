@@ -720,3 +720,112 @@ TEST_CASE("reduce_max rejects bad shapes and a non-contiguous output", "[ops]") 
     Tensor tr = base.transpose(0, 1); // {2,3} but not contiguous
     REQUIRE_THROWS_AS(reduce_max(a, tr), std::invalid_argument);
 }
+
+/* ------------------------------------------------------------------------ */
+/* The row walk                                                              */
+/* ------------------------------------------------------------------------ */
+//
+// The elementwise kernels walk one row at a time, and take a faster loop when
+// every input's last stride is 1. These are the layouts that sit on the seams
+// of that: unit inner stride with rows that are NOT adjacent, one strided
+// input beside one contiguous one, and a rank that uses all four loops.
+
+TEST_CASE("elementwise ops read a column slice one row at a time", "[ops]") {
+    Tensor t({3, 5});
+    fill_iota(t);
+
+    // Columns 1..3: {1 2 3} {6 7 8} {11 12 13}. Inner stride 1, row stride 5,
+    // so each row is contiguous and the rows are not.
+    const Tensor s = t.slice(1, 1, 3);
+    REQUIRE(s.stride(1) == 1);
+    REQUIRE(s.stride(0) == 5);
+
+    const float rows[9] = {1, 2, 3, 6, 7, 8, 11, 12, 13};
+
+    Tensor b({3, 3});
+    fill_with(b, 10.0f);
+    Tensor out({3, 3});
+
+    // Walking s flat from its first element would read 1 2 3 4 5 6 7 8 9.
+    add(s, b, out);
+    for (std::size_t i = 0; i < 9; i++) {
+        REQUIRE(out.data()[i] == rows[i] + 10.0f);
+    }
+
+    scale(s, 2.0f, out);
+    for (std::size_t i = 0; i < 9; i++) {
+        REQUIRE(out.data()[i] == rows[i] * 2.0f);
+    }
+
+    fill_with(out, 100.0f);
+    add_into(out, s);
+    for (std::size_t i = 0; i < 9; i++) {
+        REQUIRE(out.data()[i] == rows[i] + 100.0f);
+    }
+}
+
+TEST_CASE("a binary op is strided if either input is", "[ops]") {
+    Tensor t({2, 3});
+    fill_iota(t);
+    const Tensor tr = t.transpose(0, 1); // {0 3} {1 4} {2 5}
+
+    Tensor b({3, 2});
+    fill_with(b, 10.0f);
+    Tensor out({3, 2});
+
+    // The strided one SECOND. A check that only looked at the first input's
+    // stride would take the contiguous loop and read tr flat.
+    add(b, tr, out);
+
+    const float expected[6] = {10, 13, 11, 14, 12, 15};
+    for (std::size_t i = 0; i < 6; i++) {
+        REQUIRE(out.data()[i] == expected[i]);
+    }
+}
+
+TEST_CASE("elementwise ops walk a permuted rank-4 input", "[ops]") {
+    // Rank 4 is the only rank where all three outer loops step a stride.
+    Tensor t({2, 3, 2, 5});
+    fill_iota(t);
+    const Tensor p = t.permute({3, 1, 0, 2}); // {5,3,2,2}, no stride in order
+
+    Tensor u({5, 3, 2, 2});
+    fill_iota(u);
+    const Tensor q = u.transpose(2, 3);       // strided a different way
+
+    Tensor out({5, 3, 2, 2});
+    Tensor acc({5, 3, 2, 2});
+    fill_with(acc, 1000.0f);
+
+    add(p, q, out);
+    add_into(acc, p);
+
+    // operator() is the independent reference: it indexes through the strides
+    // without any of the walking code under test.
+    std::size_t wrong_add = 0, wrong_acc = 0;
+    for (std::size_t i = 0; i < 5; i++) {
+        for (std::size_t j = 0; j < 3; j++) {
+            for (std::size_t k = 0; k < 2; k++) {
+                for (std::size_t l = 0; l < 2; l++) {
+                    wrong_add += out(i, j, k, l) != p(i, j, k, l) + q(i, j, k, l);
+                    wrong_acc += acc(i, j, k, l) != 1000.0f + p(i, j, k, l);
+                }
+            }
+        }
+    }
+    REQUIRE(wrong_add == 0);
+    REQUIRE(wrong_acc == 0);
+
+    scale(p, 3.0f, out);
+    std::size_t wrong_scale = 0;
+    for (std::size_t i = 0; i < 5; i++) {
+        for (std::size_t j = 0; j < 3; j++) {
+            for (std::size_t k = 0; k < 2; k++) {
+                for (std::size_t l = 0; l < 2; l++) {
+                    wrong_scale += out(i, j, k, l) != 3.0f * p(i, j, k, l);
+                }
+            }
+        }
+    }
+    REQUIRE(wrong_scale == 0);
+}
