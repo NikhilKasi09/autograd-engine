@@ -7,6 +7,8 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
+
 #include <cstdint>
 #include <span>
 #include <stdexcept>
@@ -623,4 +625,88 @@ TEST_CASE("a runtime reshape to a different element count is rejected", "[tensor
     const std::vector<std::size_t> shape = {3, 5};
 
     REQUIRE_THROWS_AS(t.reshape(std::span<const std::size_t>{shape}), std::invalid_argument);
+}
+
+/* ------------------------------------------------------------------------ */
+/* clone() through each kind of view                                         */
+/* ------------------------------------------------------------------------ */
+//
+// clone() is the copy behind contiguous(), and backward runs it on a
+// transposed operand every training step. Each case here is a layout its row
+// walk treats differently.
+
+TEST_CASE("clone() of a column slice copies each row from where it starts",
+          "[tensor][view]") {
+    Tensor t({3, 5});
+    fill_iota(t);
+
+    // Columns 1..3: unit inner stride, but the rows are 5 apart, not 3.
+    const Tensor copy = t.slice(1, 1, 3).clone();
+
+    REQUIRE(copy.is_contiguous());
+    REQUIRE_FALSE(copy.shares_storage_with(t));
+
+    // A flat copy from the slice's first element would give 1 2 3 4 5 6 7 8 9.
+    const float expected[9] = {1, 2, 3, 6, 7, 8, 11, 12, 13};
+    for (std::size_t i = 0; i < 9; i++) {
+        REQUIRE(copy.data()[i] == expected[i]);
+    }
+}
+
+TEST_CASE("clone() of an expanded view writes every repeat", "[tensor][view]") {
+    Tensor row({1, 3});
+    fill_iota(row);
+
+    // Stride 0 down the rows: four logical rows, one stored.
+    const Tensor copy = row.expand({4, 3}).clone();
+
+    REQUIRE(copy.numel() == 12);
+    for (std::size_t i = 0; i < 4; i++) {
+        for (std::size_t j = 0; j < 3; j++) {
+            REQUIRE(copy(i, j) == static_cast<float>(j));
+        }
+    }
+
+    // And across the columns, where the inner stride is the one that is 0.
+    Tensor col({3, 1});
+    fill_iota(col);
+    const Tensor wide = col.expand({3, 4}).clone();
+    for (std::size_t i = 0; i < 3; i++) {
+        for (std::size_t j = 0; j < 4; j++) {
+            REQUIRE(wide(i, j) == static_cast<float>(i));
+        }
+    }
+}
+
+TEST_CASE("clone() of a permuted rank-4 view matches element for element",
+          "[tensor][view]") {
+    Tensor t({2, 3, 2, 5});
+    fill_iota(t);
+    const Tensor p = t.permute({3, 1, 0, 2}); // {5,3,2,2}
+
+    const Tensor copy = p.clone();
+
+    REQUIRE(copy.is_contiguous());
+    std::size_t wrong = 0;
+    for (std::size_t i = 0; i < 5; i++) {
+        for (std::size_t j = 0; j < 3; j++) {
+            for (std::size_t k = 0; k < 2; k++) {
+                for (std::size_t l = 0; l < 2; l++) {
+                    wrong += copy(i, j, k, l) != p(i, j, k, l);
+                }
+            }
+        }
+    }
+    REQUIRE(wrong == 0);
+}
+
+TEST_CASE("clone() keeps the sign of a negative zero", "[tensor]") {
+    // A copy that went through an add - 0 + x - would turn -0 into +0.
+    Tensor t({1, 2});
+    t(0, 0) = -0.0f;
+    t(0, 1) = 1.0f;
+
+    const Tensor copy = t.transpose(0, 1).clone();
+
+    REQUIRE(std::signbit(copy(0, 0)));
 }

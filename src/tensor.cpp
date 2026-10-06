@@ -207,19 +207,45 @@ bool Tensor::shares_storage_with(const Tensor &other) const noexcept {
 Tensor Tensor::clone() const {
     Tensor result(shape_, rank_);
 
-    std::size_t n = numel();
-    for (std::size_t lin = 0; lin < n; ++lin) {
-        std::size_t remaining = lin;
-        std::size_t src_offset = 0;
+    // Shape and strides padded to MAX_RANK on the LEFT, so the last dimension
+    // is the innermost loop at any rank. Turning a linear index back into a
+    // multi-index instead costs a divide per dimension for every element.
+    std::array<std::size_t, MAX_RANK> shape;
+    std::array<std::size_t, MAX_RANK> strides;
+    shape.fill(1);
+    strides.fill(0);
 
-        for (std::size_t d = rank_; d > 0; --d) {
-            std::size_t dim = d - 1;
-            std::size_t idx = remaining % shape_[dim];
-            remaining /= shape_[dim];
-            src_offset += idx * strides_[dim];
+    const std::size_t pad = MAX_RANK - rank_;
+    for (std::size_t d = 0; d < rank_; ++d) {
+        shape[d + pad] = shape_[d];
+        strides[d + pad] = strides_[d];
+    }
+
+    const float *src = data();
+    float *dst_row = result.data();         // contiguous: rows are adjacent
+
+    const std::size_t n = shape[3];         // elements in one row
+    const std::size_t step = strides[3];    // distance between them in src
+
+    for (std::size_t i0 = 0; i0 < shape[0]; ++i0) {
+        for (std::size_t i1 = 0; i1 < shape[1]; ++i1) {
+            for (std::size_t i2 = 0; i2 < shape[2]; ++i2) {
+                // Where this row starts: every dimension but the last.
+                const float *src_row = src + i0*strides[0] + i1*strides[1] + i2*strides[2];
+
+                if (step == 1) {
+                    // The row is one contiguous run, as in a slice.
+                    std::memcpy(dst_row, src_row, n * sizeof(float));
+                } else {
+                    // A transpose steps by a whole row; an expand by 0.
+                    for (std::size_t j = 0; j < n; ++j) {
+                        dst_row[j] = src_row[j * step];
+                    }
+                }
+
+                dst_row += n;
+            }
         }
-
-        result.data()[lin] = data()[src_offset];
     }
 
     return result;
